@@ -1,0 +1,23 @@
+# Unreal Engine generated files and local caches
+[Bb]inaries/
+[Dd]erivedDataCache/
+[Ii]ntermediate/
+[Ss]aved/
+
+# Generated project files and local IDE settings
+.vs/
+.idea/
+*.sln
+*.suo
+*.VC.db
+*.VC.opendb
+*.opensdf
+*.sdf
+*.sln.DotSettings.user
+
+# Locally downloaded/imported asset cache
+VaultCache/
+
+# Generated files inside Unreal plugins
+Plugins/**/[Bb]inaries/
+Plugins/**/[Ii]ntermediate/
