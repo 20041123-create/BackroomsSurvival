@@ -25,6 +25,10 @@ AEnemyController::AEnemyController()
 void AEnemyController::BeginPlay()
 {
 	Super::BeginPlay();
+	if (!HasAuthority())
+	{
+		return;
+	}
 	//绑定感知组件通知
 	if (PerceptionComponent)
 	{
@@ -37,6 +41,10 @@ void AEnemyController::BeginPlay()
 void AEnemyController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);
+	if (!HasAuthority())
+	{
+		return;
+	}
 	//启动行为树
 	if (AEnemyCharacter* EnemyChracter = Cast<AEnemyCharacter>(InPawn))
 	{
@@ -73,6 +81,11 @@ ETeamAttitude::Type AEnemyController::GetTeamAttitudeTowards(const AActor& Other
 
 void AEnemyController::OnTargetPerceptionUpdate(AActor* Actor, FAIStimulus Stimulus)
 {
+	if (!HasAuthority() || !IsValid(Actor) || !GetBlackboardComponent())
+	{
+		return;
+	}
+
 	//区分是那种感知
 	if (Stimulus.Type == UAISense::GetSenseID<UAISense_Hearing>())//判断是否是听觉感知
 	{
@@ -81,10 +94,30 @@ void AEnemyController::OnTargetPerceptionUpdate(AActor* Actor, FAIStimulus Stimu
 	}
 	else if (Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>())
 	{
+		if (!Stimulus.WasSuccessfullySensed())
+		{
+			if (GetBlackboardComponent()->GetValueAsObject(TEXT("Target")) == Actor)
+			{
+				PendingLostTarget = Actor;
+				GetWorldTimerManager().ClearTimer(LostSightForgetTimer);
+				GetWorldTimerManager().SetTimer(
+					LostSightForgetTimer,
+					this,
+					&ThisClass::ForgetPendingSightTarget,
+					LostSightForgetDelay,
+					false);
+			}
+			return;
+		}
 		//看到了和离开了视觉范围
 		if (Stimulus.WasSuccessfullySensed())//如果真，则表明看到目标
 		{
 			//更新目标到黑板中
+			if (PendingLostTarget.Get() == Actor)
+			{
+				GetWorldTimerManager().ClearTimer(LostSightForgetTimer);
+				PendingLostTarget.Reset();
+			}
 			const AActor* OldTarget = Cast<AActor>(GetBlackboardComponent()->GetValueAsObject(TEXT("Target")));
 			if (IsValid(OldTarget))
 			{
@@ -107,6 +140,25 @@ void AEnemyController::OnTargetPerceptionUpdate(AActor* Actor, FAIStimulus Stimu
 }
 
 // Called every frame
+void AEnemyController::ForgetPendingSightTarget()
+{
+	AActor* Target = PendingLostTarget.Get();
+	PendingLostTarget.Reset();
+
+	UBlackboardComponent* BlackboardComponent = GetBlackboardComponent();
+	if (!HasAuthority() || !IsValid(Target) || !BlackboardComponent || !PerceptionComponent)
+	{
+		return;
+	}
+
+	const FAISenseID SightSense = UAISense::GetSenseID<UAISense_Sight>();
+	if (BlackboardComponent->GetValueAsObject(TEXT("Target")) == Target
+		&& !PerceptionComponent->HasActiveStimulus(*Target, SightSense))
+	{
+		BlackboardComponent->ClearValue(TEXT("Target"));
+	}
+}
+
 void AEnemyController::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);

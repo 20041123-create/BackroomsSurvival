@@ -35,6 +35,7 @@ protected:
 	void OnHeadIndexChanged(int32 HeadIndex);
 	
 	void OnMaster();
+	void RefreshKickAccess();
 	UFUNCTION()
 	void OnKickPlayer();
 	

@@ -35,6 +35,6 @@ protected:
 	FString PlayerName;
 	UPROPERTY(ReplicatedUsing=OnRep_PlayerJobInfo)
 	ETeamType TeamType;
-	UPROPERTY(Replicated)
+	UPROPERTY(ReplicatedUsing=OnRep_PlayerJobInfo)
 	EJobType JobType;
 };

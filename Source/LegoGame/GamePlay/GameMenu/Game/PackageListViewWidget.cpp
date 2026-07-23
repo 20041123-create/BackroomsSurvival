@@ -79,3 +79,20 @@ void UPackageListViewWidget::OnRemoveItemActorFromPackage(int32 Key, int32 ID)
 		}
 	}
 }
+
+void UPackageListViewWidget::RefreshItems(const TMap<int32, int32>& Items)
+{
+	if (!MyListView)
+	{
+		return;
+	}
+
+	MyListView->ClearListItems();
+	TArray<int32> Keys;
+	Items.GetKeys(Keys);
+	Keys.Sort();
+	for (const int32 Key : Keys)
+	{
+		OnAddItemActorToPackage(Key, Items[Key]);
+	}
+}

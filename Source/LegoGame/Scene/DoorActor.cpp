@@ -1,40 +1,77 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
-
 #include "DoorActor.h"
 
 #include "Components/BoxComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "GameFramework/GameStateBase.h"
 #include "LegoGame/Character/LgCharacterBase.h"
+#include "Net/UnrealNetwork.h"
 
-
-// Sets default values
 ADoorActor::ADoorActor()
 {
-	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = true;
-	
+	bReplicates = true;
+
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
 	StaticMeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("StaticMeshComponent"));
 	StaticMeshComponent->SetupAttachment(RootComponent);
-	
+
 	BoxComponent = CreateDefaultSubobject<UBoxComponent>(TEXT("BoxComponent"));
 	BoxComponent->SetupAttachment(RootComponent);
 	BoxComponent->SetCollisionProfileName(TEXT("Overlap"));
-	
 }
 
-// Called when the game starts or when spawned
 void ADoorActor::BeginPlay()
 {
 	Super::BeginPlay();
-	BoxComponent->OnComponentBeginOverlap.AddDynamic(this,&ThisClass::OnBoxComponentBeginOverlapEvent);
-	BoxComponent->OnComponentEndOverlap.AddDynamic(this,&ThisClass::OnBoxComponentEndOverlapEvent);
+
+	float MinCurveTime = 0.0f;
+	float MaxCurveTime = 0.0f;
+	if (AnimeCurve)
+	{
+		AnimeCurve->GetTimeRange(MinCurveTime, MaxCurveTime);
+	}
+	CurrentTimeTotal = MinCurveTime;
+
+	if (HasAuthority())
+	{
+		BoxComponent->OnComponentBeginOverlap.AddDynamic(
+			this, &ThisClass::OnBoxComponentBeginOverlapEvent);
+		BoxComponent->OnComponentEndOverlap.AddDynamic(
+			this, &ThisClass::OnBoxComponentEndOverlapEvent);
+		DoorState.StartCurveTime = MinCurveTime;
+		DoorState.StateChangeServerTime = GetSynchronizedServerTime();
+	}
+	else
+	{
+		OnRep_DoorState();
+	}
 }
 
-// Called every frame
+void ADoorActor::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(ADoorActor, DoorState);
+}
+
 void ADoorActor::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	if (HasAuthority() && DoorState.bOpen)
+	{
+		for (auto Iterator = OverlappingCharacters.CreateIterator(); Iterator; ++Iterator)
+		{
+			if (!Iterator.Key().IsValid())
+			{
+				Iterator.RemoveCurrent();
+			}
+		}
+		if (OverlappingCharacters.IsEmpty())
+		{
+			SetDoorOpen(false, DoorState.OpenDirection);
+		}
+	}
+
 	UpdateDoorAnimation(DeltaTime);
 }
 
@@ -44,61 +81,134 @@ void ADoorActor::UpdateDoorAnimation(float DeltaTime)
 	{
 		return;
 	}
-	CurrentTimeTotal+=(DeltaTime * (bOpenDoor ? 1.0f : -1.0f));
-	
-	//然后处理从曲线上获取数据
-	float Value = AnimeCurve->GetFloatValue(CurrentTimeTotal);
-	StaticMeshComponent->SetRelativeRotation(FRotator(0,Value*90*OpenDirection,0));
-	
-	float Min = 0;
-	float Max = 0;
-	AnimeCurve->GetTimeRange(Min,Max);
-	if (CurrentTimeTotal>=Max||CurrentTimeTotal<=Min)
+
+	CurrentTimeTotal += DeltaTime * (DoorState.bOpen ? 1.0f : -1.0f);
+
+	float MinCurveTime = 0.0f;
+	float MaxCurveTime = 0.0f;
+	AnimeCurve->GetTimeRange(MinCurveTime, MaxCurveTime);
+	CurrentTimeTotal = FMath::Clamp(CurrentTimeTotal, MinCurveTime, MaxCurveTime);
+
+	const float CurveValue = AnimeCurve->GetFloatValue(CurrentTimeTotal);
+	StaticMeshComponent->SetRelativeRotation(
+		FRotator(0.0f, CurveValue * 90.0f * DoorState.OpenDirection, 0.0f));
+
+	if (CurrentTimeTotal <= MinCurveTime || CurrentTimeTotal >= MaxCurveTime)
 	{
 		bDoorAnimation = false;
-		CurrentTimeTotal = FMath::Clamp(CurrentTimeTotal,Min,Max);
 	}
-	
 }
 
-void ADoorActor::OnBoxComponentBeginOverlapEvent(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
-	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
+void ADoorActor::OnBoxComponentBeginOverlapEvent(
+	UPrimitiveComponent* OverlappedComponent,
+	AActor* OtherActor,
+	UPrimitiveComponent* OtherComp,
+	int32 OtherBodyIndex,
+	bool bFromSweep,
+	const FHitResult& SweepResult)
 {
-	if (Cast<ALgCharacterBase>(OtherActor))
+	if (!HasAuthority())
 	{
-		//计算开门方向
-		FVector StandDirection = OtherActor->GetActorLocation()-GetActorLocation();
-		//转为单位向量
-		StandDirection.Normalize();
-		//计算方向点乘
-		float CosValue = FVector::DotProduct(StandDirection,GetActorRightVector());//夹角余弦值
-		//根据余弦波范围判断开门方向
-		if (CosValue>0)//站在们右侧
-		{
-			OpenDirection = -1;
-		}
-		else
-		{
-			OpenDirection = 1;
-		}
-		//处理问题
-		bDoorAnimation = true;
-		bOpenDoor = true;
+		return;
 	}
-	
+
+	ALgCharacterBase* Character = Cast<ALgCharacterBase>(OtherActor);
+	if (!IsValid(Character))
+	{
+		return;
+	}
+
+	const bool bWasEmpty = OverlappingCharacters.IsEmpty();
+	const TWeakObjectPtr<ALgCharacterBase> CharacterKey(Character);
+	int32& OverlapCount = OverlappingCharacters.FindOrAdd(CharacterKey);
+	++OverlapCount;
+	if (bWasEmpty)
+	{
+		const FVector StandDirection = (Character->GetActorLocation() - GetActorLocation()).GetSafeNormal();
+		const float NewDirection = FVector::DotProduct(StandDirection, GetActorRightVector()) > 0.0f
+			? -1.0f
+			: 1.0f;
+		SetDoorOpen(true, NewDirection);
+	}
 }
 
-void ADoorActor::OnBoxComponentEndOverlapEvent(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
-	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex)
+void ADoorActor::OnBoxComponentEndOverlapEvent(
+	UPrimitiveComponent* OverlappedComponent,
+	AActor* OtherActor,
+	UPrimitiveComponent* OtherComp,
+	int32 OtherBodyIndex)
 {
-	if (Cast<ALgCharacterBase>(OtherActor))
+	if (!HasAuthority())
 	{
-		//处理问题
-		bDoorAnimation = true;
-		bOpenDoor = false;
+		return;
 	}
-	
+
+	if (ALgCharacterBase* Character = Cast<ALgCharacterBase>(OtherActor))
+	{
+		const TWeakObjectPtr<ALgCharacterBase> CharacterKey(Character);
+		if (int32* OverlapCount = OverlappingCharacters.Find(CharacterKey))
+		{
+			--(*OverlapCount);
+			if (*OverlapCount <= 0)
+			{
+				OverlappingCharacters.Remove(CharacterKey);
+			}
+		}
+	}
+	for (auto Iterator = OverlappingCharacters.CreateIterator(); Iterator; ++Iterator)
+	{
+		if (!Iterator.Key().IsValid())
+		{
+			Iterator.RemoveCurrent();
+		}
+	}
+	if (OverlappingCharacters.IsEmpty())
+	{
+		SetDoorOpen(false, DoorState.OpenDirection);
+	}
 }
 
+void ADoorActor::SetDoorOpen(bool bOpen, float NewOpenDirection)
+{
+	if (!HasAuthority() || DoorState.bOpen == bOpen)
+	{
+		return;
+	}
 
+	DoorState.bOpen = bOpen;
+	DoorState.OpenDirection = NewOpenDirection;
+	DoorState.StartCurveTime = CurrentTimeTotal;
+	DoorState.StateChangeServerTime = GetSynchronizedServerTime();
+	bDoorAnimation = true;
+	ForceNetUpdate();
+}
 
+float ADoorActor::GetSynchronizedServerTime() const
+{
+	if (const AGameStateBase* GameState = GetWorld() ? GetWorld()->GetGameState() : nullptr)
+	{
+		return GameState->GetServerWorldTimeSeconds();
+	}
+	return GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+}
+
+void ADoorActor::OnRep_DoorState()
+{
+	if (!AnimeCurve)
+	{
+		return;
+	}
+
+	float MinCurveTime = 0.0f;
+	float MaxCurveTime = 0.0f;
+	AnimeCurve->GetTimeRange(MinCurveTime, MaxCurveTime);
+
+	const float ElapsedTime = FMath::Max(
+		0.0f,
+		GetSynchronizedServerTime() - DoorState.StateChangeServerTime);
+	CurrentTimeTotal = DoorState.StartCurveTime
+		+ ElapsedTime * (DoorState.bOpen ? 1.0f : -1.0f);
+	CurrentTimeTotal = FMath::Clamp(CurrentTimeTotal, MinCurveTime, MaxCurveTime);
+	bDoorAnimation = true;
+	UpdateDoorAnimation(0.0f);
+}

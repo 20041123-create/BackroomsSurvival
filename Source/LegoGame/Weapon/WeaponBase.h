@@ -41,13 +41,40 @@ protected:
 	virtual void GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const override;
 	
 	//生成子弹
-	void SpawnBullet();
+	void RequestFireShot();
+	void ProcessFireShot(const FVector& ViewOrigin, const FVector& ViewDirection);
 	
-	void SpawnDamage();
+	void SpawnDamage(const FVector& ViewOrigin, const FVector& ViewDirection);
 	//发射特效
 	void SpawnEffect();
 	
-	void GetFirstStartPositionAndDirection(FVector& Position,FVector& Direction);
+	void GetFireViewPoint(FVector& Position, FVector& Direction) const;
+	float GetReloadDuration() const;
+	void StartReloadOnServer();
+
+	UFUNCTION()
+	void OnRep_CurrentClipVolume();
+
+	UFUNCTION()
+	void OnRep_ID();
+
+	UFUNCTION()
+	void OnRep_CurrentState();
+
+	UFUNCTION(Server, Unreliable)
+	void Server_RequestFireShot(FVector_NetQuantize ViewOrigin, FVector_NetQuantizeNormal ViewDirection);
+
+	UFUNCTION(Server, Reliable)
+	void Server_StopFire();
+
+	UFUNCTION(Server, Reliable)
+	void Server_ReloadClip();
+
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayFireEffect();
+
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_PlayReloadMontage();
 
 public:
 	// Called every frame
@@ -73,12 +100,13 @@ public:
 	EWeaponState GetCurrentState() const {return CurrentState;}
 	
 protected:
-	UPROPERTY(Replicated)
+	UPROPERTY(ReplicatedUsing=OnRep_ID)
 	int32 ID;
 	//最大子弹容量
 	UPROPERTY(EditAnywhere)
 	int32 MaxClipVolume;
 	//当前弹夹容积
+	UPROPERTY(ReplicatedUsing=OnRep_CurrentClipVolume)
 	int32 CurrClipVolume;
 	//开火间隔
 	UPROPERTY(EditAnywhere)
@@ -102,10 +130,20 @@ protected:
 	UPROPERTY(Replicated)
 	TObjectPtr<ALgCharacterBase> MyMaster;
 	
-	FTimerHandle TimerHandle;
+	FTimerHandle FireTimerHandle;
+	FTimerHandle ReloadTimerHandle;
 	
 	float LastFireTime;
 	
+	UPROPERTY(ReplicatedUsing=OnRep_CurrentState)
 	EWeaponState CurrentState;
+
+	bool bWantsToFire = false;
+
+	UPROPERTY(EditDefaultsOnly, Category="Network", meta=(ClampMin="0.0"))
+	float MaxClientViewOriginError = 600.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category="Network", meta=(ClampMin="0.0", ClampMax="180.0"))
+	float MaxClientAimErrorDegrees = 30.0f;
 	
 };

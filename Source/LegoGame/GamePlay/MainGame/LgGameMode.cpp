@@ -26,13 +26,13 @@ APawn* ALgGameMode::SpawnDefaultPawnAtTransform_Implementation(AController* NewP
 {
 	//调整出生位置
 	FTransform NewSpawnTransform = SpawnTransform;
-	if (ALgPlayerState* PlayerState = Cast<ALgPlayerState>(NewPlayer))
+	if (ALgPlayerState* PlayerState = NewPlayer ? NewPlayer->GetPlayerState<ALgPlayerState>() : nullptr)
 	{
 		GetTeamSpawnTransform(PlayerState->GetTeamType(), NewSpawnTransform);
 		NewPlayer->SetControlRotation(NewSpawnTransform.Rotator());
 	}
 	
-	return Super::SpawnDefaultPawnAtTransform_Implementation(NewPlayer, SpawnTransform);
+	return Super::SpawnDefaultPawnAtTransform_Implementation(NewPlayer, NewSpawnTransform);
 }
 
 void ALgGameMode::GetTeamSpawnTransform(ETeamType TeamType, FTransform& SpawnTransform)

@@ -10,12 +10,6 @@ void UNotify_Reload::Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase*
                             const FAnimNotifyEventReference& EventReference)
 {
 	//回填子弹
-	if (ALgCharacterBase* CharacterBase = Cast<ALgCharacterBase>(MeshComp->GetOwner()))
-	{
-		if (CharacterBase->GetHoldWeapon())
-		{
-			CharacterBase->GetHoldWeapon()->MakeFullClip();
-		}
-	}
+	// Gameplay reload completion is driven by the authoritative weapon timer.
 	
 }

@@ -11,6 +11,8 @@ AEnemyCharacter::AEnemyCharacter()
 {
 	// Set this character to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = true;
+	bReplicates = true;
+	SetReplicateMovement(true);
 	
 	//修改控制器
 	AIControllerClass = AEnemyController::StaticClass();

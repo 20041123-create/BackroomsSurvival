@@ -11,6 +11,31 @@
 class AWeaponBase;
 enum class ESkinType : uint8;
 class ASceneItemActor;
+
+USTRUCT()
+struct FPackageItemNetEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 Key = INDEX_NONE;
+
+	UPROPERTY()
+	int32 ID = INDEX_NONE;
+};
+
+USTRUCT()
+struct FEquippedSkinNetEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	ESkinType SkinType = ESkinType::EST_None;
+
+	UPROPERTY()
+	int32 ID = INDEX_NONE;
+};
+
 //创建代理(多播代理）
 DECLARE_MULTICAST_DELEGATE_OneParam(NearItemActorChanged,ASceneItemActor*);
 
@@ -63,21 +88,36 @@ protected:
 	
 	UFUNCTION()
 	void OnRep_HoldWeapon();
+
+	UFUNCTION()
+	void OnRep_PackageSnapshot();
+
+	UFUNCTION()
+	void OnRep_SkinSnapshot();
+
+	void RebuildPackageSnapshot();
+	void RebuildSkinSnapshot();
 	
 	//RPC
-	UFUNCTION(Server, Unreliable, WithValidation)
+	UFUNCTION(Server, Reliable, WithValidation)
 	void Server_PickItemFromNear(ASceneItemActor* SceneItemActor);
 	UFUNCTION(Client, Reliable)
 	void Client_OnAddItemToPackage(int32 Key, int32 ID);
-	UFUNCTION(Server, Unreliable,WithValidation)
+	UFUNCTION(Server, Reliable,WithValidation)
 	void Server_RemoveItemFromPackageToScene(int32 Key);
 	UFUNCTION(Client, Reliable)
 	void Client_OnRemoveItemFromPackage(int32 Key, int32 ID);
 	
-	UFUNCTION(Server, Unreliable,WithValidation)
+	UFUNCTION(Server, Reliable,WithValidation)
 	void Server_PutOnSkinFromNear(ASceneItemActor* SceneItemActor,ESkinType SkinType = ESkinType::EST_None);
-	UFUNCTION(Server, Unreliable,WithValidation)
+	UFUNCTION(Server, Reliable,WithValidation)
 	void Server_PutOnSkinFromPackage(int32 Key,ESkinType SkinType);
+
+	UFUNCTION(Server, Reliable, WithValidation)
+	void Server_TakeOffToPackage(ESkinType SkinType);
+
+	UFUNCTION(Server, Reliable, WithValidation)
+	void Server_TakeOffToScene(ESkinType SkinType);
 	
 	UFUNCTION(NetMulticast, Reliable)
 	void Multi_OnPutOnSkin(ESkinType SkinType, int32 ID);
@@ -105,6 +145,8 @@ public:
 	void RemoveNearSceneItem(TObjectPtr<ASceneItemActor> SceneItem);
 	
 	TArray<ASceneItemActor*> GetNearItems() const { return NearSceneItems; }
+	const TMap<int32,int32>& GetPackageItems() const { return PackageMap; }
+	void BroadcastCurrentEquipmentState();
 	
 	//拾取道具进入背包中
 	void PickItemFromNear(ASceneItemActor* Actor);
@@ -143,6 +185,12 @@ protected:
 	
 	UPROPERTY(ReplicatedUsing=OnRep_HoldWeapon)
 	TObjectPtr<AWeaponBase> HoldWeapon;
+
+	UPROPERTY(ReplicatedUsing=OnRep_PackageSnapshot)
+	TArray<FPackageItemNetEntry> PackageSnapshot;
+
+	UPROPERTY(ReplicatedUsing=OnRep_SkinSnapshot)
+	TArray<FEquippedSkinNetEntry> SkinSnapshot;
 	
 };
 

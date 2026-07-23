@@ -5,6 +5,7 @@
 
 #include "HallGameState.h"
 #include "HallPlayerState.h"
+#include "HallGameMode.h"
 #include "LegoGame/LegoGame.h"
 #include "LegoGame/GamePlay/LgGameInstance.h"
 
@@ -67,6 +68,24 @@ void AHallPlayerController::SendChatMessage(EChatChannel Channel, const FText& T
 	}
 }
 
+void AHallPlayerController::RequestStartGame()
+{
+	Server_RequestStartGame();
+}
+
+void AHallPlayerController::RequestEndGame()
+{
+	Server_RequestEndGame();
+}
+
+void AHallPlayerController::RequestKickPlayer(AHallPlayerState* TargetPlayerState)
+{
+	if (IsValid(TargetPlayerState))
+	{
+		Server_RequestKickPlayer(TargetPlayerState);
+	}
+}
+
 void AHallPlayerController::ClientWasKicked_Implementation(const FText& KickReason)
 {
 	Super::ClientWasKicked_Implementation(KickReason);
@@ -97,4 +116,43 @@ void AHallPlayerController::Server_SendChatMessage_Implementation(EChatChannel C
 bool AHallPlayerController::Server_SendChatMessage_Validate(EChatChannel Channel, const FText& Text)
 {
 	return true;
+}
+
+void AHallPlayerController::Server_RequestStartGame_Implementation()
+{
+	const AHallPlayerState* Requester = GetPlayerState<AHallPlayerState>();
+	if (Requester && Requester->IsMaster())
+	{
+		if (AHallGameMode* GameMode = GetWorld()->GetAuthGameMode<AHallGameMode>())
+		{
+			GameMode->StartLgGame();
+		}
+	}
+}
+
+void AHallPlayerController::Server_RequestEndGame_Implementation()
+{
+	const AHallPlayerState* Requester = GetPlayerState<AHallPlayerState>();
+	if (Requester && Requester->IsMaster())
+	{
+		if (AHallGameMode* GameMode = GetWorld()->GetAuthGameMode<AHallGameMode>())
+		{
+			GameMode->EndLgGame();
+		}
+	}
+}
+
+void AHallPlayerController::Server_RequestKickPlayer_Implementation(AHallPlayerState* TargetPlayerState)
+{
+	const AHallPlayerState* Requester = GetPlayerState<AHallPlayerState>();
+	if (!Requester || !Requester->IsMaster() || !IsValid(TargetPlayerState)
+		|| TargetPlayerState->IsMaster())
+	{
+		return;
+	}
+
+	if (AHallGameMode* GameMode = GetWorld()->GetAuthGameMode<AHallGameMode>())
+	{
+		GameMode->KickPlayer(Cast<APlayerController>(TargetPlayerState->GetOwningController()));
+	}
 }

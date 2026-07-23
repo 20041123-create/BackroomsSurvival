@@ -1,15 +1,11 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
-
 #include "HallUserWidget.h"
 
 #include "Components/Button.h"
 #include "Components/ScrollBox.h"
 #include "Components/TextBlock.h"
 #include "LegoGame/LegoGame.h"
-#include "LegoGame/GamePlay/Hall/HallGameState.h"
 #include "LegoGame/GamePlay/GameMenu/Hall/HallUserInfoWidget.h"
-#include "LegoGame/GamePlay/Hall/HallGameMode.h"
+#include "LegoGame/GamePlay/Hall/HallGameState.h"
 #include "LegoGame/GamePlay/Hall/HallPlayerController.h"
 #include "LegoGame/GamePlay/Hall/HallPlayerState.h"
 
@@ -28,10 +24,11 @@ UScrollBox* UHallUserWidget::GetScrollBox(ETeamType TeamType)
 
 void UHallUserWidget::PushMessage(EChatChannel Channel, const FText& Text)
 {
-	//构建文本并设置到容器中
 	UTextBlock* TextBlock = NewObject<UTextBlock>(ChatScrollBox);
-	TextBlock->SetText(FText::Format(NSLOCTEXT("ui","cvodv1","[{0}]{1}"),LG::GetChatChannelText(Channel),Text));
-	//设置颜色
+	TextBlock->SetText(FText::Format(
+		NSLOCTEXT("ui", "cvodv1", "[{0}]{1}"),
+		LG::GetChatChannelText(Channel),
+		Text));
 	TextBlock->SetColorAndOpacity(LG::GetChatChannelColor(Channel));
 	ChatScrollBox->AddChild(TextBlock);
 }
@@ -39,121 +36,137 @@ void UHallUserWidget::PushMessage(EChatChannel Channel, const FText& Text)
 void UHallUserWidget::NativeOnInitialized()
 {
 	Super::NativeOnInitialized();
-	if (AHallGameState* Gs = Cast<AHallGameState>(GetWorld()->GetGameState()))
+
+	if (AHallGameState* GameState = GetWorld()->GetGameState<AHallGameState>())
 	{
-		Gs->OnAddPlayerState.AddUObject(this, &ThisClass::OnAddPlayerState);
-		Gs->OnRemovePlayerState.AddUObject(this, &ThisClass::OnRemovePlayerState);
-		
-		//更新面板
-		HallUserInfoWidget = LoadClass<UHallUserInfoWidget>(this, TEXT("/Script/UMGEditor.WidgetBlueprint'/Game/LegoGame/UMG/Hall/WBP_HallUserInfo.WBP_HallUserInfo_C'"));
-		for (auto Ps : Gs->PlayerArray)
+		GameState->OnAddPlayerState.AddUObject(this, &ThisClass::OnAddPlayerState);
+		GameState->OnRemovePlayerState.AddUObject(this, &ThisClass::OnRemovePlayerState);
+
+		HallUserInfoWidget = LoadClass<UHallUserInfoWidget>(
+			this,
+			TEXT("/Script/UMGEditor.WidgetBlueprint'/Game/LegoGame/UMG/Hall/WBP_HallUserInfo.WBP_HallUserInfo_C'"));
+		for (APlayerState* PlayerState : GameState->PlayerArray)
 		{
-			UHallUserInfoWidget* InfoWidget = CreateWidget<UHallUserInfoWidget>(GetOwningPlayer(),HallUserInfoWidget);
-			InfoWidget->BindPlayerState(Ps);
-			PoliceScrollBox->AddChild(InfoWidget);
+			OnAddPlayerState(PlayerState);
 		}
 	}
-	
-	//判断在客户端还是服务端
-	if (GetOwningPlayer()->HasAuthority())
+
+	if (AHallPlayerState* OwningPlayerState = GetOwningPlayer()->GetPlayerState<AHallPlayerState>())
 	{
-		ButtonTextBlock->SetText(NSLOCTEXT("ui","cdfakc9","开始游戏"));
-		QuitButtonTextBlock->SetText(NSLOCTEXT("ui","akldsj121","解散房间"));
+		OwningPlayerState->OnIsMaster.AddUObject(this, &ThisClass::OnBecameMaster);
+		if (OwningPlayerState->IsMaster())
+		{
+			OnBecameMaster();
+		}
 	}
-	SubmitButton->OnClicked.AddDynamic(this,&ThisClass::OnSubmitButtonClicked);
-	QuitButton->OnClicked.AddDynamic(this,&ThisClass::OnQuitButtonClicked);
+
+	SubmitButton->OnClicked.AddDynamic(this, &ThisClass::OnSubmitButtonClicked);
+	QuitButton->OnClicked.AddDynamic(this, &ThisClass::OnQuitButtonClicked);
 }
 
 void UHallUserWidget::OnAddPlayerState(APlayerState* PlayerState)
 {
-	UHallUserInfoWidget* InfoWidget = CreateWidget<UHallUserInfoWidget>(GetOwningPlayer(),HallUserInfoWidget);
-	InfoWidget->BindPlayerState(PlayerState);
-	PoliceScrollBox->AddChild(InfoWidget);
-	
+	if (!HallUserInfoWidget || !PlayerState)
+	{
+		return;
+	}
+
+	UHallUserInfoWidget* InfoWidget = CreateWidget<UHallUserInfoWidget>(
+		GetOwningPlayer(), HallUserInfoWidget);
+	if (InfoWidget)
+	{
+		InfoWidget->BindPlayerState(PlayerState);
+		if (!InfoWidget->GetParent())
+		{
+			PoliceScrollBox->AddChild(InfoWidget);
+		}
+	}
 }
 
 void UHallUserWidget::OnRemovePlayerState(APlayerState* PlayerState)
 {
-	for (int32 i = 0; i < PoliceScrollBox->GetChildrenCount(); ++i)
+	const auto RemoveFromScrollBox = [PlayerState](UScrollBox* ScrollBox)
 	{
-		if (UHallUserInfoWidget* InfoWidget = Cast<UHallUserInfoWidget>(PoliceScrollBox->GetChildAt(i)))
+		if (!ScrollBox)
 		{
-			if (InfoWidget->GetHallPlayerState() == PlayerState)
+			return false;
+		}
+		for (int32 Index = 0; Index < ScrollBox->GetChildrenCount(); ++Index)
+		{
+			if (UHallUserInfoWidget* InfoWidget =
+				Cast<UHallUserInfoWidget>(ScrollBox->GetChildAt(Index)))
 			{
-				InfoWidget->RemoveFromParent();
-				break;
+				if (InfoWidget->GetHallPlayerState() == PlayerState)
+				{
+					InfoWidget->RemoveFromParent();
+					return true;
+				}
 			}
 		}
-	}
-	
-	for (int32 i = 0; i<BanditScrollBox->GetChildrenCount(); ++i)
+		return false;
+	};
+
+	if (!RemoveFromScrollBox(PoliceScrollBox))
 	{
-		if (UHallUserInfoWidget* InfoWidget = Cast<UHallUserInfoWidget>(BanditScrollBox->GetChildAt(i)))
-		{
-			if (InfoWidget->GetHallPlayerState() == PlayerState)
-			{
-				InfoWidget->RemoveFromParent();
-				return;
-			}
-		}
+		RemoveFromScrollBox(BanditScrollBox);
 	}
 }
 
-
 void UHallUserWidget::SendChatMessage(EChatChannel ChatChannel, const FText& Text)
 {
-	//PushMessage(ChatChannel, Text);
-	if (AHallPlayerController* Pc = Cast<AHallPlayerController>(GetOwningPlayer()))
+	if (AHallPlayerController* PlayerController = Cast<AHallPlayerController>(GetOwningPlayer()))
 	{
-		Pc->SendChatMessage(ChatChannel, Text);
+		PlayerController->SendChatMessage(ChatChannel, Text);
 	}
-	
 }
 
 void UHallUserWidget::OnSubmitButtonClicked()
 {
-	if (GetOwningPlayer()->HasAuthority())
+	AHallPlayerState* OwningPlayerState =
+		GetOwningPlayer()->GetPlayerState<AHallPlayerState>();
+	if (!OwningPlayerState)
 	{
-		//开始游戏
-		if (AHallGameMode* Gm = Cast<AHallGameMode>(GetWorld()->GetAuthGameMode()))
-		{
-			Gm->StartLgGame();
-		}
-		
+		return;
 	}
-	else
+
+	if (OwningPlayerState->IsMaster())
 	{
-		//准备或者取消准备
-		if (AHallPlayerState* Ps = GetOwningPlayer()->GetPlayerState<AHallPlayerState>())
+		if (AHallPlayerController* PlayerController =
+			Cast<AHallPlayerController>(GetOwningPlayer()))
 		{
-			//绑定通知只需要一次
-			if (!Ps->OnReadyChanged.IsBoundToObject(this))
-			{
-				Ps->OnReadyChanged.AddUObject(this, &ThisClass::OnReadyChanged);
-			}
-			Ps->SetReady(!Ps->IsReady());
+			PlayerController->RequestStartGame();
 		}
+		return;
 	}
-	
+
+	if (!OwningPlayerState->OnReadyChanged.IsBoundToObject(this))
+	{
+		OwningPlayerState->OnReadyChanged.AddUObject(this, &ThisClass::OnReadyChanged);
+	}
+	OwningPlayerState->SetReady(!OwningPlayerState->IsReady());
 }
 
 void UHallUserWidget::OnReadyChanged(bool bReady)
 {
-	if (bReady)
-	{
-		ButtonTextBlock->SetText(NSLOCTEXT("ui","dskfgi2","取消准备"));
-	}
-	else
-	{
-		ButtonTextBlock->SetText(NSLOCTEXT("ui","dskfgi2111","准备"));
-	}
+	ButtonTextBlock->SetText(
+		bReady
+			? NSLOCTEXT("ui", "CancelReady", "取消准备")
+			: NSLOCTEXT("ui", "Ready", "准备"));
+}
+
+void UHallUserWidget::OnBecameMaster()
+{
+	ButtonTextBlock->SetText(NSLOCTEXT("ui", "MasterStartGame", "开始游戏"));
+	QuitButtonTextBlock->SetText(NSLOCTEXT("ui", "MasterDismissRoom", "解散房间"));
 }
 
 void UHallUserWidget::OnQuitButtonClicked()
 {
-	if (GetOwningPlayer()->HasAuthority())
+	const AHallPlayerState* OwningPlayerState =
+		GetOwningPlayer()->GetPlayerState<AHallPlayerState>();
+	if (OwningPlayerState && OwningPlayerState->IsMaster())
 	{
-		EndGame();	
+		EndGame();
 	}
 	else
 	{
@@ -163,17 +176,13 @@ void UHallUserWidget::OnQuitButtonClicked()
 
 void UHallUserWidget::QuitRoom()
 {
-	//退出游戏的房间
-	GetOwningPlayer()->ClientTravel(TEXT("?close"),TRAVEL_Absolute);
-	
+	GetOwningPlayer()->ClientTravel(TEXT("?close"), TRAVEL_Absolute);
 }
 
 void UHallUserWidget::EndGame()
 {
-	if (AHallGameMode* Gm = Cast<AHallGameMode>(GetWorld()->GetAuthGameMode()))
+	if (AHallPlayerController* PlayerController = Cast<AHallPlayerController>(GetOwningPlayer()))
 	{
-		Gm->EndLgGame();
+		PlayerController->RequestEndGame();
 	}
-	
 }
-

@@ -63,7 +63,7 @@ public:
 	
 	TObjectPtr<AWeaponBase> GetHoldWeapon()const;
 	
-	ETeamType GetTeamType()const {return TeamType;}
+	ETeamType GetTeamType() const;
 	
 	void StartSprint();
 	void StopSprint();
@@ -91,8 +91,11 @@ protected:
 	void ReloadWeapon();
 	
 	//RPC
-	UFUNCTION(Server, UnReliable, WithValidation)
+	UFUNCTION(Server, Reliable, WithValidation)
 	void Server_SetSprint(bool bNewSprint);
+
+	UFUNCTION(Server, Reliable, WithValidation)
+	void Server_SetIronSight(bool bNewIronSight);
 	
 protected:
 	UPROPERTY(Replicated)

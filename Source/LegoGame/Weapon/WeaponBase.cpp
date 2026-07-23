@@ -1,161 +1,248 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
-
 #include "WeaponBase.h"
+
+#include "Animation/AnimMontage.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Engine/DamageEvents.h"
+#include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "LegoGame/LegoGame.h"
 #include "LegoGame/Character/LgCharacterBase.h"
-#include "Sound/SoundCue.h"
-#include "Engine/DamageEvents.h"
+#include "LegoGame/Components/PackageComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "Sound/SoundCue.h"
+#include "TimerManager.h"
 
-
-// Sets default values
 AWeaponBase::AWeaponBase()
 {
-	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
-	PrimaryActorTick.bCanEverTick = true;
-	
+	PrimaryActorTick.bCanEverTick = false;
+
 	WeaponMeshComponent = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("SkeletalMeshComponent"));
 	SetRootComponent(WeaponMeshComponent);
-	
+
 	MaxClipVolume = 30;
+	CurrClipVolume = MaxClipVolume;
 	FireInterval = 0.1f;
-	ShotDistance = 100000.f;
-	ID = -1;
-	
-	//开启网络同步
+	ShotDistance = 100000.0f;
+	ID = INDEX_NONE;
+	CurrentState = EWeaponState::EWS_Normal;
+
 	bReplicates = true;
-	//设置枪械使用Owner的相关性
 	bNetUseOwnerRelevancy = true;
 }
 
-// Called when the game starts or when spawned
 void AWeaponBase::BeginPlay()
 {
 	Super::BeginPlay();
-	CurrClipVolume = MaxClipVolume;
+	if (HasAuthority())
+	{
+		CurrClipVolume = MaxClipVolume;
+		CurrentState = EWeaponState::EWS_Normal;
+	}
 }
 
-void AWeaponBase::GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const
+void AWeaponBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AWeaponBase, ID);
 	DOREPLIFETIME(AWeaponBase, MyMaster);
-	
+	DOREPLIFETIME_CONDITION(AWeaponBase, CurrClipVolume, COND_OwnerOnly);
+	DOREPLIFETIME(AWeaponBase, CurrentState);
 }
 
-void AWeaponBase::SpawnBullet()
+void AWeaponBase::RequestFireShot()
 {
-	if (CurrClipVolume==0)
+	if (!bWantsToFire || !MyMaster
+		|| CurrentState == EWeaponState::EWS_Reloading
+		|| CurrentState == EWeaponState::EWS_Empty)
 	{
 		return;
 	}
-	CurrentState = EWeaponState::EWS_Firing;
-	SpawnDamage();
-	SpawnEffect();
-	
-	if (--CurrClipVolume>0)
+
+	FVector ViewOrigin;
+	FVector ViewDirection;
+	GetFireViewPoint(ViewOrigin, ViewDirection);
+
+	if (HasAuthority())
 	{
-		//继续定时发射子弹
-		GetWorld()->GetTimerManager().SetTimer(TimerHandle,this,&ThisClass::SpawnBullet,FireInterval);
+		ProcessFireShot(ViewOrigin, ViewDirection);
 	}
 	else
 	{
-		CurrentState = EWeaponState::EWS_Empty;
-	}
-	LastFireTime = GetWorld()->GetTimeSeconds();
-	
-	if (OnWeaponClipChanged.IsBound())
-	{
-		OnWeaponClipChanged.Broadcast(CurrClipVolume,MaxClipVolume);
+		// Owning clients predict only the cosmetic feedback. Ammo and damage remain authoritative.
+		SpawnEffect();
+		Server_RequestFireShot(ViewOrigin, ViewDirection);
 	}
 }
 
-void AWeaponBase::SpawnDamage()
+void AWeaponBase::ProcessFireShot(const FVector& ViewOrigin, const FVector& ViewDirection)
 {
-	FVector Position;
-	FVector Direction;
-	GetFirstStartPositionAndDirection(Position,Direction);
-	
-	//发射射线
-	FHitResult Hit;
-	//如何设置忽略对象
+	if (!HasAuthority() || !MyMaster || GetOwner() != MyMaster || !MyMaster->IsIronSight()
+		|| CurrentState == EWeaponState::EWS_Reloading)
+	{
+		return;
+	}
+
+	if (CurrClipVolume <= 0)
+	{
+		CurrClipVolume = 0;
+		CurrentState = EWeaponState::EWS_Empty;
+		bWantsToFire = false;
+		GetWorldTimerManager().ClearTimer(FireTimerHandle);
+		ForceNetUpdate();
+		return;
+	}
+
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+	if (LastFireTime > 0.0f && CurrentTime - LastFireTime + KINDA_SMALL_NUMBER < FireInterval)
+	{
+		return;
+	}
+
+	const FVector NormalizedViewDirection = ViewDirection.GetSafeNormal();
+	if (NormalizedViewDirection.IsNearlyZero())
+	{
+		return;
+	}
+
+	// Player requests are checked against the server's pawn view/control rotation.
+	if (Cast<APlayerController>(MyMaster->GetController()))
+	{
+		const FVector ServerViewOrigin = MyMaster->GetPawnViewLocation();
+		if (FVector::DistSquared(ViewOrigin, ServerViewOrigin)
+			> FMath::Square(MaxClientViewOriginError))
+		{
+			return;
+		}
+
+		const FVector ServerAimDirection = MyMaster->GetBaseAimRotation().Vector().GetSafeNormal();
+		const float MinimumAimDot = FMath::Cos(FMath::DegreesToRadians(MaxClientAimErrorDegrees));
+		if (FVector::DotProduct(ServerAimDirection, NormalizedViewDirection) < MinimumAimDot)
+		{
+			return;
+		}
+	}
+
+	CurrentState = EWeaponState::EWS_Firing;
+	SpawnDamage(ViewOrigin, NormalizedViewDirection);
+	--CurrClipVolume;
+	LastFireTime = CurrentTime;
+	Multicast_PlayFireEffect();
+
+	if (CurrClipVolume <= 0)
+	{
+		CurrClipVolume = 0;
+		CurrentState = EWeaponState::EWS_Empty;
+		bWantsToFire = false;
+		GetWorldTimerManager().ClearTimer(FireTimerHandle);
+	}
+
+	if (OnWeaponClipChanged.IsBound())
+	{
+		OnWeaponClipChanged.Broadcast(CurrClipVolume, MaxClipVolume);
+	}
+	ForceNetUpdate();
+}
+
+void AWeaponBase::SpawnDamage(const FVector& ViewOrigin, const FVector& ViewDirection)
+{
+	if (!HasAuthority() || !MyMaster)
+	{
+		return;
+	}
+
+	const FVector MuzzlePosition = WeaponMeshComponent->GetSocketLocation(TEXT("Muzzle"));
+	const FVector MuzzleForward = WeaponMeshComponent->GetSocketQuaternion(TEXT("Muzzle")).GetAxisX();
+
 	FCollisionQueryParams CollisionParams;
 	CollisionParams.AddIgnoredActor(MyMaster);
-	
-	if (GetWorld()->LineTraceSingleByChannel(Hit,Position,Position+Direction*ShotDistance,WEAPON_TRACE,CollisionParams))
+	CollisionParams.AddIgnoredActor(this);
+
+	FHitResult AimHit;
+	const FVector ViewEnd = ViewOrigin + ViewDirection * ShotDistance;
+	const bool bAimHit = GetWorld()->LineTraceSingleByChannel(
+		AimHit, ViewOrigin, ViewEnd, WEAPON_TRACE, CollisionParams);
+	const FVector AimPoint = bAimHit ? AimHit.ImpactPoint : ViewEnd;
+
+	FVector ShotDirection = (AimPoint - MuzzlePosition).GetSafeNormal();
+	if (ShotDirection.IsNearlyZero() || FVector::DotProduct(ShotDirection, MuzzleForward) <= 0.0f)
 	{
-		//UE_LOG(LogTemp, Warning, TEXT("%s"),*Hit.GetActor()->GetName());
-		//造成伤害
-		FPointDamageEvent DamageEvent;
-		Hit.GetActor()->TakeDamage(1,DamageEvent,MyMaster->GetController(),this);
+		ShotDirection = MuzzleForward;
 	}
-	//绘制调试线
-	DrawDebugLine(GetWorld(),Position,Position+Direction*ShotDistance,FColor::Purple,false,3.f);
+
+	FHitResult WeaponHit;
+	if (GetWorld()->LineTraceSingleByChannel(
+		WeaponHit,
+		MuzzlePosition,
+		MuzzlePosition + ShotDirection * ShotDistance,
+		WEAPON_TRACE,
+		CollisionParams))
+	{
+		if (AActor* HitActor = WeaponHit.GetActor())
+		{
+			FPointDamageEvent DamageEvent;
+			HitActor->TakeDamage(1.0f, DamageEvent, MyMaster->GetController(), this);
+		}
+	}
 }
 
 void AWeaponBase::SpawnEffect()
 {
-	//特效和3D声音
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
 	if (FireSound)
 	{
-		//播放声音
-		UGameplayStatics::PlaySoundAtLocation(GetWorld(),FireSound,GetActorLocation());
+		UGameplayStatics::PlaySoundAtLocation(GetWorld(), FireSound, GetActorLocation());
 	}
 	if (FireParticle)
 	{
-		//播放特效
-		UGameplayStatics::SpawnEmitterAttached(FireParticle,WeaponMeshComponent,TEXT("Muzzle"));
+		UGameplayStatics::SpawnEmitterAttached(FireParticle, WeaponMeshComponent, TEXT("Muzzle"));
 	}
 }
 
-void AWeaponBase::GetFirstStartPositionAndDirection(FVector& Position, FVector& Direction)
+void AWeaponBase::GetFireViewPoint(FVector& Position, FVector& Direction) const
 {
-	//默认取一下枪口位置和角度
-	Position = WeaponMeshComponent->GetSocketLocation(TEXT("Muzzle"));
-	Direction = WeaponMeshComponent->GetSocketQuaternion(TEXT("Muzzle")).GetAxisX();
-	//判断是AI还是玩家
-	if (APlayerController* PC = Cast<APlayerController>(MyMaster->GetController()))
+	if (!MyMaster)
 	{
-		int32 SizeX = 0;
-		int32 SizeY = 0;
-		PC->GetViewportSize(SizeX,SizeY);
-		float CenterX = SizeX/2.0f;
-		float CenterY = SizeY/2.0f;
-		//将2D坐标转换为3D坐标  得到3D空间中的位置和法向量
-		FVector ProjectPosition;
-		FVector ProjectDirection;
-		if (PC->DeprojectScreenPositionToWorld(CenterX,CenterY,ProjectPosition,ProjectDirection))
-		{
-			//发射射线，通过屏幕准心找到击中点，然后从枪口位置向中心点发射射线
-			FHitResult Hit;
-			FCollisionQueryParams CollisionParams;
-			CollisionParams.AddIgnoredActor(MyMaster);
-			if (GetWorld()->LineTraceSingleByChannel(Hit,ProjectPosition,ProjectPosition+ProjectDirection*ShotDistance,WEAPON_TRACE,CollisionParams))
-			{
-				//如果检测到目标说明从屏幕中心有瞄准到内容
-				//优先判断击中位置是否在枪口后方
-				
-				
-				FVector HitDirection = (Hit.Location-Position).GetSafeNormal();
-				if (FVector::DotProduct(HitDirection,Direction)>0)
-				{
-					Direction = HitDirection;
-				}
-			}
-			//DrawDebugLine(GetWorld(),ProjectPosition,ProjectPosition+ProjectDirection*ShotDistance,FColor::Blue,false,3.f);
-		}
-		
+		Position = GetActorLocation();
+		Direction = GetActorForwardVector();
+		return;
 	}
-	else
+
+	Position = MyMaster->GetPawnViewLocation();
+	Direction = MyMaster->GetBaseAimRotation().Vector();
+
+	if (APlayerController* PlayerController = Cast<APlayerController>(MyMaster->GetController()))
 	{
-		
+		if (MyMaster->IsLocallyControlled())
+		{
+			FRotator ViewRotation;
+			PlayerController->GetPlayerViewPoint(Position, ViewRotation);
+			Direction = ViewRotation.Vector();
+		}
 	}
 }
 
-// Called every frame
+float AWeaponBase::GetReloadDuration() const
+{
+	if (!ReloadMontage)
+	{
+		return 1.0f;
+	}
+
+	const FName SectionName = MyMaster && MyMaster->IsIronSight()
+		? TEXT("Default")
+		: TEXT("IronSights");
+	const int32 SectionIndex = ReloadMontage->GetSectionIndex(SectionName);
+	if (SectionIndex != INDEX_NONE)
+	{
+		return FMath::Max(0.1f, ReloadMontage->GetSectionLength(SectionIndex));
+	}
+	return FMath::Max(0.1f, ReloadMontage->GetPlayLength());
+}
+
 void AWeaponBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
@@ -167,71 +254,198 @@ void AWeaponBase::SetMaster(ALgCharacterBase* InMaster)
 	{
 		return;
 	}
+
 	MyMaster = InMaster;
-	//设置依附关系
-	WeaponMeshComponent->AttachToComponent(MyMaster->GetMesh(),FAttachmentTransformRules::SnapToTargetNotIncludingScale,TEXT("WeaponSocket"));
-	
-	//设置owner
+	WeaponMeshComponent->AttachToComponent(
+		MyMaster->GetMesh(),
+		FAttachmentTransformRules::SnapToTargetNotIncludingScale,
+		TEXT("WeaponSocket"));
+
 	if (HasAuthority())
 	{
 		SetOwner(MyMaster);
 	}
-	
-	
 }
 
 void AWeaponBase::StartFire()
 {
-	if (CurrentState == EWeaponState::EWS_Normal)
+	if (!MyMaster || bWantsToFire
+		|| CurrentState == EWeaponState::EWS_Reloading
+		|| CurrentState == EWeaponState::EWS_Empty)
 	{
-		if (GetWorld()->GetTimeSeconds()-LastFireTime<FireInterval)//小于间隔时间不能发射
-		{
-			return;
-		}
-		SpawnBullet();
+		return;
 	}
-	
+
+	bWantsToFire = true;
+	RequestFireShot();
+	if (bWantsToFire)
+	{
+		GetWorldTimerManager().SetTimer(
+			FireTimerHandle,
+			this,
+			&ThisClass::RequestFireShot,
+			FireInterval,
+			true,
+			FireInterval);
+	}
 }
 
 void AWeaponBase::StopFire()
 {
-	//检查定时任务
-	
-	if (TimerHandle.IsValid())
+	bWantsToFire = false;
+	GetWorldTimerManager().ClearTimer(FireTimerHandle);
+
+	if (!HasAuthority())
 	{
-		GetWorld()->GetTimerManager().ClearTimer(TimerHandle);
+		Server_StopFire();
+		return;
 	}
+
 	if (CurrentState == EWeaponState::EWS_Firing)
 	{
-		CurrentState = EWeaponState::EWS_Normal;
+		CurrentState = CurrClipVolume > 0
+			? EWeaponState::EWS_Normal
+			: EWeaponState::EWS_Empty;
+		ForceNetUpdate();
 	}
 }
 
 void AWeaponBase::ReloadClip()
 {
-	if (CurrentState == EWeaponState::EWS_Reloading)//如果当前在换子弹则不要进入更换弹夹
+	if (!MyMaster || CurrentState == EWeaponState::EWS_Reloading
+		|| CurrClipVolume >= MaxClipVolume)
 	{
 		return;
 	}
-	CurrentState = EWeaponState::EWS_Reloading;
-	StopFire();
-	
-	if (ReloadMontage&&MyMaster)
+
+	bWantsToFire = false;
+	GetWorldTimerManager().ClearTimer(FireTimerHandle);
+
+	if (HasAuthority())
 	{
-		MyMaster->PlayAnimMontage(ReloadMontage,1,MyMaster->IsIronSight() ? TEXT("Default") : TEXT("IronSights"));
+		StartReloadOnServer();
+		return;
 	}
-	
+
+	CurrentState = EWeaponState::EWS_Reloading;
+	if (ReloadMontage)
+	{
+		MyMaster->PlayAnimMontage(
+			ReloadMontage,
+			1.0f,
+			MyMaster->IsIronSight() ? TEXT("Default") : TEXT("IronSights"));
+	}
+	Server_ReloadClip();
+}
+
+void AWeaponBase::StartReloadOnServer()
+{
+	if (!HasAuthority() || !MyMaster || CurrentState == EWeaponState::EWS_Reloading
+		|| CurrClipVolume >= MaxClipVolume)
+	{
+		return;
+	}
+
+	StopFire();
+	CurrentState = EWeaponState::EWS_Reloading;
+	Multicast_PlayReloadMontage();
+	GetWorldTimerManager().SetTimer(
+		ReloadTimerHandle,
+		this,
+		&ThisClass::MakeFullClip,
+		GetReloadDuration(),
+		false);
+	ForceNetUpdate();
 }
 
 void AWeaponBase::MakeFullClip()
 {
-	//UE_LOG(LogTemp, Warning, TEXT("re"));
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	GetWorldTimerManager().ClearTimer(ReloadTimerHandle);
 	CurrClipVolume = MaxClipVolume;
-	
+	CurrentState = EWeaponState::EWS_Normal;
+
 	if (OnWeaponClipChanged.IsBound())
 	{
-		OnWeaponClipChanged.Broadcast(CurrClipVolume,MaxClipVolume);
+		OnWeaponClipChanged.Broadcast(CurrClipVolume, MaxClipVolume);
 	}
-	CurrentState = EWeaponState::EWS_Normal;
+	ForceNetUpdate();
 }
 
+void AWeaponBase::OnRep_CurrentClipVolume()
+{
+	if (CurrClipVolume <= 0)
+	{
+		bWantsToFire = false;
+		GetWorldTimerManager().ClearTimer(FireTimerHandle);
+	}
+	if (OnWeaponClipChanged.IsBound())
+	{
+		OnWeaponClipChanged.Broadcast(CurrClipVolume, MaxClipVolume);
+	}
+}
+
+void AWeaponBase::OnRep_ID()
+{
+	if (MyMaster && MyMaster->GetPackageComponent())
+	{
+		MyMaster->GetPackageComponent()->BroadcastCurrentEquipmentState();
+	}
+}
+
+void AWeaponBase::OnRep_CurrentState()
+{
+	if (CurrentState == EWeaponState::EWS_Reloading
+		|| CurrentState == EWeaponState::EWS_Empty)
+	{
+		bWantsToFire = false;
+		GetWorldTimerManager().ClearTimer(FireTimerHandle);
+	}
+}
+
+void AWeaponBase::Server_RequestFireShot_Implementation(
+	FVector_NetQuantize ViewOrigin,
+	FVector_NetQuantizeNormal ViewDirection)
+{
+	ProcessFireShot(ViewOrigin, ViewDirection);
+}
+
+void AWeaponBase::Server_StopFire_Implementation()
+{
+	StopFire();
+}
+
+void AWeaponBase::Server_ReloadClip_Implementation()
+{
+	StartReloadOnServer();
+}
+
+void AWeaponBase::Multicast_PlayFireEffect_Implementation()
+{
+	if (MyMaster && MyMaster->IsLocallyControlled() && !HasAuthority())
+	{
+		return;
+	}
+	SpawnEffect();
+}
+
+void AWeaponBase::Multicast_PlayReloadMontage_Implementation()
+{
+	if (GetNetMode() == NM_DedicatedServer || !ReloadMontage || !MyMaster)
+	{
+		return;
+	}
+	if (MyMaster->IsLocallyControlled() && !HasAuthority())
+	{
+		return;
+	}
+
+	MyMaster->PlayAnimMontage(
+		ReloadMontage,
+		1.0f,
+		MyMaster->IsIronSight() ? TEXT("Default") : TEXT("IronSights"));
+}

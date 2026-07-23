@@ -18,6 +18,7 @@ class LEGOGAME_API UPackageListViewWidget : public UUserWidget
 public:
 	void OnAddItemActorToPackage(int32 Key,int32 ID);
 	void OnRemoveItemActorFromPackage(int32 Key,int32 ID);
+	void RefreshItems(const TMap<int32,int32>& Items);
 	
 protected:
 	//响应拖拽抬起

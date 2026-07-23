@@ -90,6 +90,8 @@ void UUPackageUserWidget::NativeConstruct()
 		
 		Player->GetPackageComponent()->OnEquipWeapon.AddUObject(this,&ThisClass::OnEquipWeapon);
 		Player->GetPackageComponent()->OnUnEquipWeapon.AddUObject(this,&ThisClass::OnUnEquipWeapon);
+		PackageListViewWidget->RefreshItems(Player->GetPackageComponent()->GetPackageItems());
+		Player->GetPackageComponent()->BroadcastCurrentEquipmentState();
 		
 		//生成展示actor
 		if (!PlayerModelActor)

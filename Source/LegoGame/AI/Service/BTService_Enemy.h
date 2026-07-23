@@ -20,6 +20,7 @@ protected:
 	
 	//当开启了创建独立节点，可以重写节点创建函数
 	virtual void OnInstanceCreated(UBehaviorTreeComponent& OwnerComp) override;
+	virtual void OnInstanceDestroyed(UBehaviorTreeComponent& OwnerComp) override;
 	
 	void OnReceiveDamage(ALgCharacterBase* Target);
 	

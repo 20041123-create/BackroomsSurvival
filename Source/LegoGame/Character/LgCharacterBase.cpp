@@ -45,6 +45,7 @@ void ALgCharacterBase::BeginPlay()
 		//装卸武器的绑定通知
 		PackageComponent->OnEquipWeapon.AddUObject(this,&ThisClass::OnEquipWeapon);
 		PackageComponent->OnUnEquipWeapon.AddUObject(this,&ThisClass::OnUnEquipWeapon);
+		PackageComponent->BroadcastCurrentEquipmentState();
 	}
 	//UpdateMeshCount = 6;
 	
@@ -99,6 +100,10 @@ void ALgCharacterBase::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 float ALgCharacterBase::TakeDamage(float DamageAmount, struct FDamageEvent const& DamageEvent,
 	class AController* EventInstigator, AActor* DamageCauser)
 {
+	if (!HasAuthority() || !EventInstigator || !EventInstigator->GetPawn())
+	{
+		return 0.0f;
+	}
 	
 	UE_LOG(LogTemp, Warning, TEXT("我是%s,我被%s攻击了"),*GetName(),*EventInstigator->GetPawn()->GetName());
 	
@@ -163,6 +168,15 @@ TObjectPtr<AWeaponBase> ALgCharacterBase::GetHoldWeapon() const
 	return nullptr;
 }
 
+ETeamType ALgCharacterBase::GetTeamType() const
+{
+	if (const ALgPlayerState* Ps = GetPlayerState<ALgPlayerState>())
+	{
+		return Ps->GetTeamType();
+	}
+	return TeamType;
+}
+
 void ALgCharacterBase::StartFire()
 {
 	if (PackageComponent&&PackageComponent->GetHoldWeapon()&&IsIronSight())
@@ -173,7 +187,7 @@ void ALgCharacterBase::StartFire()
 
 void ALgCharacterBase::StopFire()
 {
-	if (PackageComponent&&PackageComponent->GetHoldWeapon()&&IsIronSight())
+	if (PackageComponent&&PackageComponent->GetHoldWeapon())
 	{
 		PackageComponent->GetHoldWeapon()->StopFire();
 	}
@@ -184,6 +198,10 @@ void ALgCharacterBase::StartIronSight()
 	if (PackageComponent&&PackageComponent->GetHoldWeapon())
 	{
 		bIronSight = true;
+		if (!HasAuthority())
+		{
+			Server_SetIronSight(true);
+		}
 	}
 	
 }
@@ -191,6 +209,10 @@ void ALgCharacterBase::StartIronSight()
 void ALgCharacterBase::StopIronSight()
 {
 	bIronSight = false;
+	if (!HasAuthority())
+	{
+		Server_SetIronSight(false);
+	}
 	
 }
 
@@ -264,6 +286,16 @@ void ALgCharacterBase::Server_SetSprint_Implementation(bool bNewSprint)
 }
 
 bool ALgCharacterBase::Server_SetSprint_Validate(bool bNewSprint)
+{
+	return true;
+}
+
+void ALgCharacterBase::Server_SetIronSight_Implementation(bool bNewIronSight)
+{
+	bIronSight = bNewIronSight && PackageComponent && PackageComponent->GetHoldWeapon();
+}
+
+bool ALgCharacterBase::Server_SetIronSight_Validate(bool bNewIronSight)
 {
 	return true;
 }

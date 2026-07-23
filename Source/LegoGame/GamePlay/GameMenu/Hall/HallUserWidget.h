@@ -39,6 +39,7 @@ protected:
 	void OnSubmitButtonClicked();
 	
 	void OnReadyChanged(bool bReady);
+	void OnBecameMaster();
 	
 	UFUNCTION()
 	void OnQuitButtonClicked();

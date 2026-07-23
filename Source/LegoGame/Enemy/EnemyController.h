@@ -28,6 +28,15 @@ protected:
 	UFUNCTION()
 	void OnTargetPerceptionUpdate(AActor* Actor, FAIStimulus Stimulus);
 
+	void ForgetPendingSightTarget();
+
+protected:
+	UPROPERTY(EditDefaultsOnly, Category="AI|Perception", meta=(ClampMin="0.0"))
+	float LostSightForgetDelay = 5.0f;
+
+	TWeakObjectPtr<AActor> PendingLostTarget;
+	FTimerHandle LostSightForgetTimer;
+
 public:
 	// Called every frame
 	virtual void Tick(float DeltaTime) override;

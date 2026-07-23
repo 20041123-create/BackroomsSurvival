@@ -21,6 +21,10 @@ UBTService_Enemy::UBTService_Enemy()
 void UBTService_Enemy::OnInstanceCreated(UBehaviorTreeComponent& OwnerComp)
 {
 	Super::OnInstanceCreated(OwnerComp);
+	if (!OwnerComp.GetAIOwner() || !OwnerComp.GetAIOwner()->HasAuthority())
+	{
+		return;
+	}
 	BehaviorTreeComponent = &OwnerComp;
 	//绑定代理
 	if (ALgCharacterBase* MySelfCharacter = Cast<ALgCharacterBase>(OwnerComp.GetAIOwner()->GetPawn()))
@@ -31,9 +35,27 @@ void UBTService_Enemy::OnInstanceCreated(UBehaviorTreeComponent& OwnerComp)
 	
 }
 
+void UBTService_Enemy::OnInstanceDestroyed(UBehaviorTreeComponent& OwnerComp)
+{
+	if (OwnerComp.GetAIOwner())
+	{
+		if (ALgCharacterBase* MySelfCharacter = Cast<ALgCharacterBase>(OwnerComp.GetAIOwner()->GetPawn()))
+		{
+			MySelfCharacter->OnReceiveDamage.RemoveAll(this);
+			if (MySelfCharacter->GetPackageComponent())
+			{
+				MySelfCharacter->GetPackageComponent()->OnEquipWeapon.RemoveAll(this);
+			}
+		}
+	}
+	BehaviorTreeComponent = nullptr;
+	Super::OnInstanceDestroyed(OwnerComp);
+}
+
 void UBTService_Enemy::OnReceiveDamage(ALgCharacterBase* Target)
 {
-	if (BehaviorTreeComponent)
+	if (BehaviorTreeComponent && IsValid(Target) && BehaviorTreeComponent->GetAIOwner()
+		&& BehaviorTreeComponent->GetBlackboardComponent())
 	{
 		//比较谁离我最近作为第一攻击目标
 		const AActor* OldTarget = Cast<AActor>(BehaviorTreeComponent->GetBlackboardComponent()->GetValue<UBlackboardKeyType_Object>(TargetKey.GetSelectedKeyID()));
@@ -64,7 +86,7 @@ void UBTService_Enemy::InitializeFromAsset(UBehaviorTree& Asset)
 
 void UBTService_Enemy::OnEquipWeapon(int32 ID)
 {
-	if (BehaviorTreeComponent)
+	if (BehaviorTreeComponent && BehaviorTreeComponent->GetBlackboardComponent())
 	{
 		BehaviorTreeComponent->GetBlackboardComponent()->SetValueAsBool(TEXT("bHoldWeapon"), true);
 	}

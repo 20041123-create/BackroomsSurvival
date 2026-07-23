@@ -41,8 +41,126 @@ void UPackageComponent::GetLifetimeReplicatedProps(TArray<class FLifetimePropert
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	
 	DOREPLIFETIME(UPackageComponent, HoldWeapon);
+	DOREPLIFETIME_CONDITION(UPackageComponent, PackageSnapshot, COND_OwnerOnly);
+	DOREPLIFETIME(UPackageComponent, SkinSnapshot);
 }
 
+void UPackageComponent::RebuildPackageSnapshot()
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	PackageSnapshot.Reset(PackageMap.Num());
+	TArray<int32> Keys;
+	PackageMap.GetKeys(Keys);
+	Keys.Sort();
+	for (const int32 Key : Keys)
+	{
+		FPackageItemNetEntry& Entry = PackageSnapshot.AddDefaulted_GetRef();
+		Entry.Key = Key;
+		Entry.ID = PackageMap[Key];
+	}
+	GetOwner()->ForceNetUpdate();
+}
+
+void UPackageComponent::RebuildSkinSnapshot()
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	SkinSnapshot.Reset(SkinMap.Num());
+	TArray<ESkinType> SkinTypes;
+	SkinMap.GetKeys(SkinTypes);
+	SkinTypes.Sort([](const ESkinType Left, const ESkinType Right)
+	{
+		return static_cast<uint8>(Left) < static_cast<uint8>(Right);
+	});
+	for (const ESkinType SkinType : SkinTypes)
+	{
+		FEquippedSkinNetEntry& Entry = SkinSnapshot.AddDefaulted_GetRef();
+		Entry.SkinType = SkinType;
+		Entry.ID = SkinMap[SkinType];
+	}
+	GetOwner()->ForceNetUpdate();
+}
+
+void UPackageComponent::OnRep_PackageSnapshot()
+{
+	const TMap<int32, int32> PreviousItems = PackageMap;
+	PackageMap.Reset();
+	for (const FPackageItemNetEntry& Entry : PackageSnapshot)
+	{
+		if (Entry.Key >= 0 && Entry.ID >= 0)
+		{
+			PackageMap.Add(Entry.Key, Entry.ID);
+		}
+	}
+
+	for (const TPair<int32, int32>& PreviousItem : PreviousItems)
+	{
+		if (!PackageMap.Contains(PreviousItem.Key)
+			|| PackageMap[PreviousItem.Key] != PreviousItem.Value)
+		{
+			OnRemoveItemFromPackage.Broadcast(PreviousItem.Key, PreviousItem.Value);
+		}
+	}
+	for (const TPair<int32, int32>& Item : PackageMap)
+	{
+		if (!PreviousItems.Contains(Item.Key) || PreviousItems[Item.Key] != Item.Value)
+		{
+			OnAddItemToPackage.Broadcast(Item.Key, Item.Value);
+		}
+	}
+}
+
+void UPackageComponent::OnRep_SkinSnapshot()
+{
+	const TMap<ESkinType, int32> PreviousSkins = SkinMap;
+	SkinMap.Reset();
+	for (const FEquippedSkinNetEntry& Entry : SkinSnapshot)
+	{
+		if (Entry.SkinType != ESkinType::EST_None && Entry.ID >= 0)
+		{
+			SkinMap.Add(Entry.SkinType, Entry.ID);
+		}
+	}
+
+	for (const TPair<ESkinType, int32>& PreviousSkin : PreviousSkins)
+	{
+		if (!SkinMap.Contains(PreviousSkin.Key))
+		{
+			OnTakeOffSkin.Broadcast(PreviousSkin.Key, PreviousSkin.Value);
+		}
+	}
+	for (const TPair<ESkinType, int32>& Skin : SkinMap)
+	{
+		if (!PreviousSkins.Contains(Skin.Key) || PreviousSkins[Skin.Key] != Skin.Value)
+		{
+			OnPutOnSkin.Broadcast(Skin.Key, Skin.Value);
+		}
+	}
+}
+
+
+void UPackageComponent::BroadcastCurrentEquipmentState()
+{
+	for (const TPair<ESkinType, int32>& Skin : SkinMap)
+	{
+		OnPutOnSkin.Broadcast(Skin.Key, Skin.Value);
+	}
+	if (HoldWeapon)
+	{
+		OnEquipWeapon.Broadcast(HoldWeapon->GetID());
+	}
+	else
+	{
+		OnUnEquipWeapon.Broadcast(INDEX_NONE);
+	}
+}
 
 // Called every frame
 void UPackageComponent::TickComponent(float DeltaTime, ELevelTick TickType,
@@ -86,6 +204,11 @@ void UPackageComponent::PickItemFromNear(ASceneItemActor* SceneItemActorActor)
 			Server_PickItemFromNear(SceneItemActorActor);
 			return;
 		}
+		if (FVector::DistSquared(SceneItemActorActor->GetActorLocation(), GetOwner()->GetActorLocation())
+			> FMath::Square(250.0f))
+		{
+			return;
+		}
 		AddItemToPackage(SceneItemActorActor->GetID());
 		//道具拾取完毕，移除地面上的Actor
 		SceneItemActorActor->Destroy();
@@ -99,21 +222,24 @@ void UPackageComponent::AddItemToPackage(int32 ID)
 	//将Id记录到我们的Map容器中
 	const int32 Key = AllowPackageKey();
 	PackageMap.Add(Key,ID);
+	RebuildPackageSnapshot();
 	Client_OnAddItemToPackage(Key,ID);
 }
 
 void UPackageComponent::Client_OnAddItemToPackage_Implementation(int32 Key, int32 ID)
 {
+	bool bShouldNotify = GetOwner()->HasAuthority();
 	//对于客户端来说没有背包数据
 	if (!GetOwner()->HasAuthority())
 	{
-		if (!PackageMap.Contains(Key))
+		if (!PackageMap.Contains(Key) || PackageMap[Key] != ID)
 		{
 			PackageMap.Add(Key,ID);
+			bShouldNotify = true;
 		}
 	}
 	
-	if (OnAddItemToPackage.IsBound())
+	if (bShouldNotify && OnAddItemToPackage.IsBound())
 	{
 		OnAddItemToPackage.Broadcast(Key,ID);
 	}
@@ -137,6 +263,7 @@ bool UPackageComponent::RemoveItemFromPackage(int32 Key,int32& ID)
 	{
 		ID = PackageMap[Key];
 		PackageMap.Remove(Key);
+		RebuildPackageSnapshot();
 		Client_OnRemoveItemFromPackage(Key,ID);
 		return true;
 	}
@@ -146,7 +273,8 @@ bool UPackageComponent::RemoveItemFromPackage(int32 Key,int32& ID)
 void UPackageComponent::Client_OnRemoveItemFromPackage_Implementation(int32 Key, int32 ID)
 {
 	//广播
-	if (OnRemoveItemFromPackage.IsBound())
+	if (OnRemoveItemFromPackage.IsBound()
+		&& (GetOwner()->HasAuthority() || PackageMap.Contains(Key)))
 	{
 		OnRemoveItemFromPackage.Broadcast(Key,ID);
 	}
@@ -192,6 +320,10 @@ bool UPackageComponent::Server_RemoveItemFromPackageToScene_Validate(int32 Key)
 
 void UPackageComponent::SpawnSceneItemActorFromPlayerNear(int32 ID)
 {
+	if (!GetOwner() || !GetOwner()->HasAuthority() || ID < 0)
+	{
+		return;
+	}
 	//从玩家附近生成一个道具
 	//让一个向量绕着另外一个向量旋转一个角度
 	FVector NewDirection = GetOwner()->GetActorForwardVector().RotateAngleAxis(FMath::FRandRange(-90.f,90.f),FVector::UpVector);//让使用组件的角色的正方向，绕着世界的上方向旋转-90，90
@@ -254,7 +386,11 @@ bool UPackageComponent::PutOnSkin(int32 ID, ESkinType SkinType)
 	{
 		SkinMap.Add(SkinType,ID);
 	}
-	Multi_OnPutOnSkin(SkinType,ID);
+	RebuildSkinSnapshot();
+	if (OnPutOnSkin.IsBound())
+	{
+		OnPutOnSkin.Broadcast(SkinType, ID);
+	}
 	
 	return true;
 }
@@ -278,6 +414,7 @@ int32 UPackageComponent::TakeOffSkin(ESkinType SkinType)
 	{
 		const int32 ID = SkinMap[SkinType];
 		SkinMap.Remove(SkinType);
+		RebuildSkinSnapshot();
 		
 		//代理广播
 		if (OnTakeOffSkin.IsBound())
@@ -291,6 +428,10 @@ int32 UPackageComponent::TakeOffSkin(ESkinType SkinType)
 
 void UPackageComponent::EquipWeapon(int32 ID)
 {
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
 	//装备武器
 	const FPropsBase* PropsBase = GetWorld()->GetGameInstance()->GetSubsystem<UPropsSubsystem>()->GetPropsById(ID);
 	if (!PropsBase || PropsBase->Type!=EPropsType::EPT_Weapon)
@@ -323,6 +464,7 @@ void UPackageComponent::EquipWeapon(int32 ID)
 		//UE_LOG(LogTemp, Warning, TEXT("yesyesyes"));
 		OnEquipWeapon.Broadcast(ID);
 	}
+	GetOwner()->ForceNetUpdate();
 	
 	//Multi_OnEquipWeapon(ID);
 	
@@ -370,7 +512,7 @@ void UPackageComponent::Server_PickItemFromNear_Implementation(ASceneItemActor* 
 bool UPackageComponent::Server_PickItemFromNear_Validate(ASceneItemActor* SceneItemActor)
 {
 	//安全校验
-	return (SceneItemActor->GetActorLocation() - GetOwner()->GetActorLocation()).Length() <= 250;
+	return true;
 	
 }
 
@@ -386,7 +528,10 @@ void UPackageComponent::PutOnSkinFromNear(ASceneItemActor* SceneItemActor, ESkin
 	}
 	
 	//穿戴装备
-	if (IsValid(SceneItemActor)&&PutOnSkin(SceneItemActor->GetID(),SkinType))
+	if (IsValid(SceneItemActor)
+		&& FVector::DistSquared(SceneItemActor->GetActorLocation(), GetOwner()->GetActorLocation())
+			<= FMath::Square(250.0f)
+		&& PutOnSkin(SceneItemActor->GetID(),SkinType))
 	{
 		//移除场景道具
 		SceneItemActor->Destroy();
@@ -436,6 +581,11 @@ bool UPackageComponent::Server_PutOnSkinFromPackage_Validate(int32 Key, ESkinTyp
 
 void UPackageComponent::TakeOffToPackage(ESkinType SkinType)
 {
+	if (!GetOwner()->HasAuthority())
+	{
+		Server_TakeOffToPackage(SkinType);
+		return;
+	}
 	//处理脱掉装饰性道具
 	int32 ID = TakeOffSkin(SkinType);
 	if (ID>=0)
@@ -447,12 +597,37 @@ void UPackageComponent::TakeOffToPackage(ESkinType SkinType)
 
 void UPackageComponent::TakeOffToScene(ESkinType SkinType)
 {
+	if (!GetOwner()->HasAuthority())
+	{
+		Server_TakeOffToScene(SkinType);
+		return;
+	}
 	int32 ID = TakeOffSkin(SkinType);
 	if (ID>=0)
 	{
 		SpawnSceneItemActorFromPlayerNear(ID);
 	}
 	
+}
+
+void UPackageComponent::Server_TakeOffToPackage_Implementation(ESkinType SkinType)
+{
+	TakeOffToPackage(SkinType);
+}
+
+bool UPackageComponent::Server_TakeOffToPackage_Validate(ESkinType SkinType)
+{
+	return SkinType != ESkinType::EST_None;
+}
+
+void UPackageComponent::Server_TakeOffToScene_Implementation(ESkinType SkinType)
+{
+	TakeOffToScene(SkinType);
+}
+
+bool UPackageComponent::Server_TakeOffToScene_Validate(ESkinType SkinType)
+{
+	return SkinType != ESkinType::EST_None;
 }
 
 void UPackageComponent::EquipWeaponFromNear(ASceneItemActor* SceneItemActor)
@@ -466,7 +641,9 @@ void UPackageComponent::EquipWeaponFromNear(ASceneItemActor* SceneItemActor)
 		return;
 	}
 	
-	if (IsValid(SceneItemActor)&&SceneItemActor->GetID()>=WEAPON_INDEX)
+	if (IsValid(SceneItemActor) && SceneItemActor->GetID() >= WEAPON_INDEX
+		&& FVector::DistSquared(SceneItemActor->GetActorLocation(), GetOwner()->GetActorLocation())
+			<= FMath::Square(250.0f))
 	{
 		//装备武器
 		EquipWeapon(SceneItemActor->GetID());
@@ -545,6 +722,7 @@ void UPackageComponent::UnEquipWeaponToScene()
 		SpawnSceneItemActorFromPlayerNear(HoldWeapon->GetID());
 		HoldWeapon->Destroy();
 		HoldWeapon = nullptr;
+		GetOwner()->ForceNetUpdate();
 	}
 	if (OnUnEquipWeapon.IsBound())
 	{
@@ -575,6 +753,7 @@ void UPackageComponent::UnEquipWeaponToPackage()
 		AddItemToPackage(HoldWeapon->GetID());
 		HoldWeapon->Destroy();
 		HoldWeapon = nullptr;
+		GetOwner()->ForceNetUpdate();
 	}
 	if (OnUnEquipWeapon.IsBound())
 	{

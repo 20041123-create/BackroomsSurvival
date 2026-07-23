@@ -27,6 +27,8 @@ public:
 	void SetPlayerInfo(int32 InHeadIndex,const FString& InHallPlayerName,ETeamType InTeamType,EJobType InJobType);
 	
 	ETeamType GetTeamType() const {return TeamType;}
+	EJobType GetJobType() const {return JobType;}
+	int32 GetHeadIndex() const {return HeadIndex;}
 	
 	FString GetHallPlayerName() const {return HallPlayerName;}
 	

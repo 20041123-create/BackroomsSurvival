@@ -93,7 +93,8 @@ void UBTDecorator_CheckHasBlock::TickNode(UBehaviorTreeComponent& OwnerComp, uin
 	Super::TickNode(OwnerComp, NodeMemory, DeltaSeconds);
 	//对于装饰器来说，如果只开启Tick,那么Tick不会执行，还需要保证当前装饰器需要开启观察者终止
 	float* CheckTick = reinterpret_cast<float*>(NodeMemory);
-	if (*CheckTick-=DeltaSeconds<0)
+	*CheckTick -= DeltaSeconds;
+	if (*CheckTick <= 0.0f)
 	{
 		//开启检查
 		if (!CalculateRawConditionValue(OwnerComp,NodeMemory))//返回假说明两点之间没有障碍物了，需要立刻刷新父节点执行权

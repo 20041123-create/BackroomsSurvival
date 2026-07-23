@@ -30,6 +30,7 @@ void UGameFetureUserWidget::OnEquipWeapon(int32 ID)
 	{
 		if (Player->GetHoldWeapon())
 		{
+			Player->GetHoldWeapon()->OnWeaponClipChanged.RemoveAll(this);
 			Player->GetHoldWeapon()->OnWeaponClipChanged.AddUObject(this,&ThisClass::OnWeaponClipChanged);
 			OnWeaponClipChanged(Player->GetHoldWeapon()->GetCurrentClipVolume(),Player->GetHoldWeapon()->GetMaxClipVolume());
 		}
