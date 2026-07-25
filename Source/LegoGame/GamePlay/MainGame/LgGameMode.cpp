@@ -13,8 +13,10 @@
 
 ALgGameMode::ALgGameMode()
 {
+	constexpr TCHAR TestPath[] = TEXT("/Script/Engine.Blueprint'/Game/LegoGame/Blueprints/Player/BP_TestPlayer.BP_TestPlayer_C'");
+	constexpr TCHAR PlayerPath[] =TEXT("/Script/Engine.Blueprint'/Game/LegoGame/Blueprints/Player/BP_Player.BP_Player_C'");
 	//设置默认角色类
-	ConstructorHelpers::FClassFinder<APlayerCharacter> PlayerClass(TEXT("/Script/Engine.Blueprint'/Game/LegoGame/Blueprints/Player/BP_Player.BP_Player_C'"));
+	ConstructorHelpers::FClassFinder<APlayerCharacter> PlayerClass(TestPath);
 	DefaultPawnClass = PlayerClass.Class;
 	
 	PlayerControllerClass = ALgPlayerController::StaticClass();

@@ -96,7 +96,7 @@ void UUPackageUserWidget::NativeConstruct()
 		//生成展示actor
 		if (!PlayerModelActor)
 		{
-			TSubclassOf<APlayerModelActor> ActorClass = LoadClass<APlayerModelActor>(nullptr,TEXT("/Script/Engine.Blueprint'/Game/LegoGame/Blueprints/Player/BP_PlayerModel.BP_PlayerModel_C'"));
+			TSubclassOf<APlayerModelActor> ActorClass = LoadClass<APlayerModelActor>(nullptr,TEXT("/Script/Engine.Blueprint'/Game/LegoGame/Blueprints/Player/BP_TestPlayerModel.BP_TestPlayerModel_C'"));
 			PlayerModelActor = GetWorld()->SpawnActor<APlayerModelActor>(ActorClass,FVector(0,0,3000),FRotator(0,180,0));
 			if (PlayerModelActor)
 			{
