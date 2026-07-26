@@ -7,6 +7,7 @@
 #include "GameMenuHUD.generated.h"
 
 
+class UGameMenuUserWidget;
 class URegisterUserWidget;
 class ULoginUserWidget;
 class USettingUserWidget;//前向声明
@@ -42,10 +43,16 @@ protected:
 	UFUNCTION(BlueprintCallable)
 	void ShowWaitingUI();
 	
+	UFUNCTION(BlueprintCallable)
+	void ShowGameMenuUI();
+	
 	UFUNCTION(BlueprintCallable, Category = "UI")
 	UUserWidget* GetWaitingUI() const{return WaitingWidget;}
 	
 protected:
+	UPROPERTY()
+	TObjectPtr<UGameMenuUserWidget> GameMenuUserWidget;
+	
 	UPROPERTY()
 	TObjectPtr<USettingUserWidget> SettingUserWidget;
 	

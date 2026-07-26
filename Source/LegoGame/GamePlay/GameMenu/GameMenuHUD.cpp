@@ -11,20 +11,31 @@
 void AGameMenuHUD::BeginPlay()
 {
 	Super::BeginPlay();
+	ShowGameMenuUI();
+	
+}
+
+void AGameMenuHUD::ShowGameMenuUI()
+{
 	//显示UI
 	//手动加载UMG类
 	//参数说明：1.Outer:加载的资源属于谁,这样操作方便后期的内存管理
 	//当一个对象被加载到内存中，引擎会检查你内部数据对象，归属于我的数据对象会随之被释放（并不是绝对，当对象被其他人持有会跳过释放）
 	//当Outer填入的nullptr,则这个对象会放置在临时空间，临时空间随时可能被引擎回收
-	TSubclassOf<UGameMenuUserWidget>  WidgetClass = LoadClass<UGameMenuUserWidget>(nullptr,TEXT("/Script/UMGEditor.WidgetBlueprint'/Game/LegoGame/UMG/GameMenu/WBP_GameMenu.WBP_GameMenu_C'"));
-	//创建对象 借助全集函数CreateWidget
-	UGameMenuUserWidget* GameMenuUserWidget = CreateWidget<UGameMenuUserWidget>(GetOwningPlayerController(),WidgetClass);
+	if (!GameMenuUserWidget)
+	{
+		TSubclassOf<UGameMenuUserWidget>  WidgetClass = LoadClass<UGameMenuUserWidget>(nullptr,TEXT("/Script/UMGEditor.WidgetBlueprint'/Game/LegoGame/UMG/GameMenu/WBP_GameMenu.WBP_GameMenu_C'"));
+		//创建对象 借助全集函数CreateWidget
+		GameMenuUserWidget = CreateWidget<UGameMenuUserWidget>(GetOwningPlayerController(),WidgetClass);
+	}
+	
 	if (GameMenuUserWidget)
 	{
 		GameMenuUserWidget->AddToViewport();//添加到视口
 		//显示鼠标光标
 		GetOwningPlayerController()->bShowMouseCursor = true;
 	}
+	
 }
 
 void AGameMenuHUD::ShowSettingUI()
@@ -104,3 +115,5 @@ void AGameMenuHUD::ShowWaitingUI()
 		WaitingWidget->AddToViewport();
 	}
 }
+
+
