@@ -1,50 +1,50 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
-
 #include "GameFetureUserWidget.h"
 
 #include "Components/TextBlock.h"
-#include "LegoGame/Components/PackageComponent.h"
-#include "LegoGame/Player/PlayerCharacter.h"
-#include "LegoGame/Weapon/WeaponBase.h"
+#include "LegoGame/Survival/Contracts/SurvivalInterfaces.h"
 
-void UGameFetureUserWidget::NativeOnInitialized()
+void UGameFetureUserWidget::NativeConstruct()
 {
-	Super::NativeOnInitialized();
-	if (APlayerCharacter* Player = Cast<APlayerCharacter>(GetOwningPlayerPawn()))
-	{
-		if (Player->GetPackageComponent())
-		{
-			Player->GetPackageComponent()->OnEquipWeapon.AddUObject(this,&ThisClass::OnEquipWeapon);
-			Player->GetPackageComponent()->OnUnEquipWeapon.AddUObject(this,&ThisClass::OnUnEquipWeapon);
-		}
-	}
-	
+	Super::NativeConstruct();
+	RefreshWeaponAmmo();
 }
 
-void UGameFetureUserWidget::OnEquipWeapon(int32 ID)
+void UGameFetureUserWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
+	Super::NativeTick(MyGeometry, InDeltaTime);
+	if (GetWorld() && GetWorld()->GetTimeSeconds() >= NextAmmoRefreshWorldTime)
+	{
+		NextAmmoRefreshWorldTime = GetWorld()->GetTimeSeconds() + 0.1f;
+		RefreshWeaponAmmo();
+	}
+}
+
+void UGameFetureUserWidget::RefreshWeaponAmmo()
+{
+	if (!WeaponClipTextBlock)
+	{
+		return;
+	}
+
+	APawn* Pawn = GetOwningPlayerPawn();
+	if (!Pawn || !Pawn->GetClass()->ImplementsInterface(USurvivalWeaponStateInterface::StaticClass()))
+	{
+		WeaponClipTextBlock->SetVisibility(ESlateVisibility::Hidden);
+		return;
+	}
+
+	const FSurvivalWeaponAmmoSnapshot Snapshot =
+		ISurvivalWeaponStateInterface::Execute_GetSurvivalWeaponAmmoSnapshot(Pawn);
+	if (!Snapshot.bHasEquippedWeapon)
+	{
+		WeaponClipTextBlock->SetVisibility(ESlateVisibility::Hidden);
+		return;
+	}
+
 	WeaponClipTextBlock->SetVisibility(ESlateVisibility::Visible);
-	//更新子弹
-	if (APlayerCharacter* Player = Cast<APlayerCharacter>(GetOwningPlayerPawn()))
-	{
-		if (Player->GetHoldWeapon())
-		{
-			Player->GetHoldWeapon()->OnWeaponClipChanged.RemoveAll(this);
-			Player->GetHoldWeapon()->OnWeaponClipChanged.AddUObject(this,&ThisClass::OnWeaponClipChanged);
-			OnWeaponClipChanged(Player->GetHoldWeapon()->GetCurrentClipVolume(),Player->GetHoldWeapon()->GetMaxClipVolume());
-		}
-	}
-}
-
-void UGameFetureUserWidget::OnUnEquipWeapon(int32 ID)
-{
-	WeaponClipTextBlock->SetVisibility(ESlateVisibility::Hidden);
-	
-}
-
-void UGameFetureUserWidget::OnWeaponClipChanged(int32 CurrClipVolume, int32 MaxClipVolume)
-{
-	//更新UI
-	WeaponClipTextBlock->SetText(FText::Format(NSLOCTEXT("ui","classgt3","{0}/{1}"),FText::AsNumber(CurrClipVolume),FText::AsNumber(MaxClipVolume)));
+	WeaponClipTextBlock->SetText(FText::Format(
+		NSLOCTEXT("Survival", "GameFeatureAmmoStatus", "Ammo {0}/{1}  Reserve {2}"),
+		Snapshot.LoadedAmmo,
+		Snapshot.ClipCapacity,
+		Snapshot.ReserveAmmo));
 }

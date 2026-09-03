@@ -13,6 +13,7 @@ class UInputAction;
 class UCameraComponent;
 class USpringArmComponent;
 class UInputMappingContext;
+struct FSurvivalPlayerInteractionTestAccess;
 
 UCLASS()
 class LEGOGAME_API APlayerCharacter : public ALgCharacterBase
@@ -24,6 +25,8 @@ public:
 	APlayerCharacter();
 
 protected:
+	friend struct FSurvivalPlayerInteractionTestAccess;
+
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
 	
@@ -38,6 +41,7 @@ protected:
 	void Look(FInputActionValue const& InputActionValue); 
 	
 	void TogglePackageUI();
+	void InteractWithNearbySurvivalActor();
 
 	UFUNCTION()
 	void OnComponentBeginOverlapEvent(UPrimitiveComponent* OverlappedComponent,
@@ -87,4 +91,7 @@ protected:
 	TObjectPtr<UCustomKeySaveGame> CustomKeySaveGame;
 	
 	float MouseSpeed = 0;
+
+	/** Client proximity cache; server validates the target again through PackageComponent. */
+	TSet<TWeakObjectPtr<AActor>> NearbySurvivalInteractables;
 };

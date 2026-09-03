@@ -94,6 +94,10 @@ public:
 	
 	int32 GetCurrentClipVolume() const {return CurrClipVolume;}
 	int32 GetMaxClipVolume() const {return MaxClipVolume;}
+	float GetDamagePerShot() const { return DamagePerShot; }
+	int32 GetAmmoItemId() const;
+	int32 ExtractLoadedAmmo();
+	void PrepareForSurvivalInventory();
 	
 	WeaponClipChanged OnWeaponClipChanged;
 	
@@ -126,6 +130,10 @@ protected:
 	//射击距离
 	UPROPERTY(EditAnywhere)
 	float ShotDistance;
+
+	/** Server-authoritative damage applied by one confirmed weapon trace. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Weapon|Damage", meta=(ClampMin="0.0"))
+	float DamagePerShot = 10.0f;
 	
 	UPROPERTY(Replicated)
 	TObjectPtr<ALgCharacterBase> MyMaster;
@@ -134,6 +142,7 @@ protected:
 	FTimerHandle ReloadTimerHandle;
 	
 	float LastFireTime;
+	int32 PendingReloadAmount = 0;
 	
 	UPROPERTY(ReplicatedUsing=OnRep_CurrentState)
 	EWeaponState CurrentState;

@@ -25,7 +25,7 @@ protected:
 	
 	virtual void NativeOnListItemObjectSet(UObject* ListItemObject) override;//当元素对象被设置的时候回调
 	
-	void InitPanel(int32 ID);
+	void InitPanel(int32 ID, int32 Quantity = 1);
 	
 	UPackageItemWidget* CopySelf();
 	
@@ -36,6 +36,9 @@ public:
 	TObjectPtr<ASceneItemActor> GetSceneItemActor() const {return SceneItemActor;}
 	
 	int32 GetPackageKey() const {return PackageKey;}
+	bool IsSurvivalStack() const { return bIsSurvivalStack; }
+	int32 GetSurvivalSlotId() const { return SurvivalSlotId; }
+	void UpdateSelectionHighlight(int32 SelectedSlotId);
 protected:
 	
 	UPROPERTY(meta=(BindWidget))
@@ -45,5 +48,7 @@ protected:
 	UPROPERTY()
 	TObjectPtr<ASceneItemActor> SceneItemActor;
 	
-	int32 PackageKey;
+	int32 PackageKey = INDEX_NONE;
+	int32 SurvivalSlotId = INDEX_NONE;
+	bool bIsSurvivalStack = false;
 };

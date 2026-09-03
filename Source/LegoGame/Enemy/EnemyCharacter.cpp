@@ -4,6 +4,7 @@
 #include "EnemyCharacter.h"
 
 #include "EnemyController.h"
+#include "LegoGame/Survival/SurvivalVitalsComponent.h"
 
 
 // Sets default values
@@ -18,6 +19,17 @@ AEnemyCharacter::AEnemyCharacter()
 	AIControllerClass = AEnemyController::StaticClass();
 	//更换控制器的启用模式
 	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
+}
+
+bool AEnemyCharacter::InitializeSurvivalDifficulty(float DifficultyMultiplier)
+{
+	if (!HasAuthority() || HasActorBegunPlay() || !FMath::IsFinite(DifficultyMultiplier) || DifficultyMultiplier <= 0.0f)
+	{
+		return false;
+	}
+
+	USurvivalVitalsComponent* Vitals = GetSurvivalVitalsComponent();
+	return Vitals && Vitals->SetInitialDifficultyMultiplier(DifficultyMultiplier);
 }
 
 // Called when the game starts or when spawned

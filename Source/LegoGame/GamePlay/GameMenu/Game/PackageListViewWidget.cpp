@@ -1,6 +1,5 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
-
 #include "PackageListViewWidget.h"
 
 #include "PackageItemWidget.h"
@@ -8,91 +7,170 @@
 #include "WeaponFrameWidget.h"
 #include "Blueprint/DragDropOperation.h"
 #include "Components/ListView.h"
-
+#include "Engine/GameInstance.h"
+#include "Engine/World.h"
 #include "LegoGame/Components/PackageComponent.h"
 #include "LegoGame/Data/PackageItemData.h"
 #include "LegoGame/Player/PlayerCharacter.h"
+#include "LegoGame/Subsystem/PropsSubsystem.h"
 
-
-//此函数需要返回一个bool值，目的是告诉引擎管理器，你是否要消耗掉当前的松手，否则继续向下传递
-bool UPackageListViewWidget::NativeOnDrop(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent,
-                                          UDragDropOperation* InOperation)
+void UPackageListViewWidget::NativeConstruct()
 {
-	//拖拽道具松手响应逻辑
+	Super::NativeConstruct();
+	if (MyListView)
+	{
+		MyListView->OnItemDoubleClicked().RemoveAll(this);
+		MyListView->OnItemDoubleClicked().AddUObject(this, &ThisClass::HandleItemDoubleClicked);
+	}
+}
+
+void UPackageListViewWidget::NativeDestruct()
+{
+	if (MyListView)
+	{
+		MyListView->OnItemDoubleClicked().RemoveAll(this);
+	}
+	Super::NativeDestruct();
+}
+
+void UPackageListViewWidget::HandleItemDoubleClicked(UObject* ListItem)
+{
+	if (!MyListView || !ListItem)
+	{
+		return;
+	}
+
+	APlayerCharacter* Player = Cast<APlayerCharacter>(GetOwningPlayerPawn());
+	UPackageComponent* Package = Player ? Player->GetPackageComponent() : nullptr;
+	if (RequestUseSurvivalConsumable(ListItem, Package))
+	{
+		const UPackageItemData* ItemData = CastChecked<UPackageItemData>(ListItem);
+		UE_LOG(LogTemp, Display, TEXT("Survival consumable double-click request sent for ItemId=%d SlotId=%d."),
+			ItemData->ID, ItemData->SurvivalSlotId);
+	}
+}
+
+bool UPackageListViewWidget::RequestUseSurvivalConsumable(UObject* ListItem, UPackageComponent* Package)
+{
+	const UPackageItemData* ItemData = Cast<UPackageItemData>(ListItem);
+	if (!ItemData || !ItemData->bIsSurvivalStack || ItemData->SurvivalSlotId == INDEX_NONE
+		|| ItemData->ID == INDEX_NONE || ItemData->Quantity <= 0 || !Package)
+	{
+		return false;
+	}
+
+	FSurvivalItemView CurrentItem;
+	if (!Package->GetSurvivalInventoryItem(ItemData->SurvivalSlotId, CurrentItem)
+		|| CurrentItem.Stack.ItemId != ItemData->ID || CurrentItem.Stack.Quantity <= 0)
+	{
+		return false;
+	}
+
+	UWorld* World = Package->GetWorld();
+	UPropsSubsystem* Props = World && World->GetGameInstance()
+		? World->GetGameInstance()->GetSubsystem<UPropsSubsystem>()
+		: nullptr;
+	float HealthDelta = 0.0f;
+	float HungerDelta = 0.0f;
+	float ThirstDelta = 0.0f;
+	if (!Props || !Props->GetConsumableEffects(ItemData->ID, HealthDelta, HungerDelta, ThirstDelta))
+	{
+		return false;
+	}
+
+	Package->SetSelectedSurvivalSlotId(ItemData->SurvivalSlotId);
+	Package->RequestConsumeItemStack(ItemData->SurvivalSlotId, 1);
+	return true;
+}
+
+bool UPackageListViewWidget::NativeOnDrop(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent,
+	UDragDropOperation* InOperation)
+{
 	if (APlayerCharacter* Player = Cast<APlayerCharacter>(GetOwningPlayerPawn()))
 	{
-		if (Player->GetPackageComponent())
+		if (UPackageComponent* Package = Player->GetPackageComponent())
 		{
-			//拾取道具到背包
-			//先检查拖拽的是什m
-			if (UPackageItemWidget* PackageItemWidget = Cast<UPackageItemWidget>(InOperation->Payload))//通过InOperation中的Payload来判断拖拽的是什么
+			if (UPackageItemWidget* PackageItemWidget = Cast<UPackageItemWidget>(InOperation->Payload))
 			{
 				if (PackageItemWidget->GetSceneItemActor())
 				{
-					Player->GetPackageComponent()->PickItemFromNear(PackageItemWidget->GetSceneItemActor());
+					Package->PickItemFromNear(PackageItemWidget->GetSceneItemActor());
 				}
 			}
-			else if (USkinSlotWidget * SkinSlot = Cast<USkinSlotWidget>(InOperation->Payload))
+			else if (USkinSlotWidget* SkinSlot = Cast<USkinSlotWidget>(InOperation->Payload))
 			{
-				Player->GetPackageComponent()->TakeOffToPackage(SkinSlot->GetSkinType());
+				Package->TakeOffToPackage(SkinSlot->GetSkinType());
 			}
 			else if (Cast<UWeaponFrameWidget>(InOperation->Payload))
 			{
-				Player->GetPackageComponent()->UnEquipWeaponToPackage();
+				Package->UnEquipWeaponToPackage();
 			}
 		}
 	}
 	return true;
 }
 
-
 void UPackageListViewWidget::OnAddItemActorToPackage(int32 Key, int32 ID)
 {
-	if (!MyListView)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("okokok"));
-		return;
-	}
-	if (UPackageItemData* Data = NewObject<UPackageItemData>(this))
-	{
-		// Data->ItemKey = Key;
-		// Data->ItemID = ID;
-		Data->Key = Key;
-		Data->ID = ID;
-		MyListView->AddItem(Data);
-		//UE_LOG(LogTemp, Warning, TEXT("okokok"));// 此时 Data 的身份是合法的，这里就不会崩了
-	}
+	RefreshItems();
 }
 
 void UPackageListViewWidget::OnRemoveItemActorFromPackage(int32 Key, int32 ID)
 {
-	//通知一个道具被扔掉
-	for (int32 i = 0;i<MyListView->GetNumItems();++i)
-	{
-		if (UPackageItemData* Data = Cast<UPackageItemData>(MyListView->GetItemAt(i)))
-		{
-			if (Data->Key == Key)
-			{
-				MyListView->RemoveItem(Data);
-				break;
-			}
-		}
-	}
+	RefreshItems();
 }
 
-void UPackageListViewWidget::RefreshItems(const TMap<int32, int32>& Items)
+void UPackageListViewWidget::RefreshItems()
 {
 	if (!MyListView)
+	{
+		return;
+	}
+
+	APlayerCharacter* Player = Cast<APlayerCharacter>(GetOwningPlayerPawn());
+	UPackageComponent* Package = Player ? Player->GetPackageComponent() : nullptr;
+	if (!Package)
 	{
 		return;
 	}
 
 	MyListView->ClearListItems();
 	TArray<int32> Keys;
-	Items.GetKeys(Keys);
+	Package->GetPackageItems().GetKeys(Keys);
 	Keys.Sort();
 	for (const int32 Key : Keys)
 	{
-		OnAddItemActorToPackage(Key, Items[Key]);
+		UPackageItemData* Data = NewObject<UPackageItemData>(this);
+		if (!Data)
+		{
+			continue;
+		}
+
+		Data->Key = Key;
+		Data->ID = Package->GetPackageItems()[Key];
+		FItemStack SurvivalStack;
+		if (Package->GetSurvivalStackForPackageKey(Key, SurvivalStack))
+		{
+			Data->bIsSurvivalStack = true;
+			Data->SurvivalSlotId = SurvivalStack.SlotId;
+			Data->Quantity = SurvivalStack.Quantity;
+		}
+		MyListView->AddItem(Data);
+	}
+}
+
+void UPackageListViewWidget::UpdateSurvivalSelectionHighlight(int32 SelectedSlotId)
+{
+	if (!MyListView)
+	{
+		return;
+	}
+
+	for (UUserWidget* EntryWidget : MyListView->GetDisplayedEntryWidgets())
+	{
+		if (UPackageItemWidget* PackageItemWidget = Cast<UPackageItemWidget>(EntryWidget))
+		{
+			PackageItemWidget->UpdateSelectionHighlight(SelectedSlotId);
+		}
 	}
 }

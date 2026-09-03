@@ -14,6 +14,9 @@ class LEGOGAME_API UPackageItemData : public UObject
 {
 	GENERATED_BODY()
 public:
-	int32 Key;
-	int32 ID;
+	int32 Key = INDEX_NONE;
+	int32 ID = INDEX_NONE;
+	int32 SurvivalSlotId = INDEX_NONE;
+	int32 Quantity = 1;
+	bool bIsSurvivalStack = false;
 };

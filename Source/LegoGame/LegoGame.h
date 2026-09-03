@@ -17,7 +17,10 @@ enum class ETeamType : uint8
 {
 	ETT_None,
 	ETT_Police,
-	ETT_Bandit
+	ETT_Bandit,
+	// Neutral PvE faction used by Survival mode. Appended to preserve the
+	// serialized values of the existing player factions.
+	ETT_Monster
 };
 
 UENUM(BlueprintType)

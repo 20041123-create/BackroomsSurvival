@@ -17,6 +17,9 @@ public:
 	// Sets default values for this character's properties
 	AEnemyCharacter();
 
+	/** Server-only deferred-spawn setup. The multiplier is applied once before BeginPlay. */
+	bool InitializeSurvivalDifficulty(float DifficultyMultiplier);
+
 protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;

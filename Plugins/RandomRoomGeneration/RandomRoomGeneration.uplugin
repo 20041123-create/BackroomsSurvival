@@ -1,0 +1,13 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0",
+  "FriendlyName": "Random Room Generation",
+  "Description": "Deterministic, server-authoritative modular room generation.",
+  "Category": "Gameplay",
+  "CanContainContent": false,
+  "Modules": [
+    { "Name": "RandomRoomGeneration", "Type": "Runtime", "LoadingPhase": "Default" },
+    { "Name": "RandomRoomGenerationRuntime", "Type": "Runtime", "LoadingPhase": "Default" }
+  ]
+}

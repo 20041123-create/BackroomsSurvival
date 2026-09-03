@@ -4,12 +4,13 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "LegoGame/Survival/Contracts/SurvivalInterfaces.h"
 #include "SceneItemActor.generated.h"
 
 
 class UBillboardComponent;
 UCLASS()
-class LEGOGAME_API ASceneItemActor : public AActor
+class LEGOGAME_API ASceneItemActor : public AActor, public ISurvivalInteractableInterface
 {
 	GENERATED_BODY()
 
@@ -25,13 +26,21 @@ protected:
 	
 	void InitMesh();
 
+	UFUNCTION()
+	void OnRep_ItemStack();
+
 public:
 	// Called every frame
 	virtual void Tick(float DeltaTime) override;
 	
-	int32 GetID() const {return ID;}
+	int32 GetID() const {return ItemStack.IsValid() ? ItemStack.ItemId : ID;}
 	
-	void SetID(int32 NewID) {ID = NewID;}
+	void SetID(int32 NewID);
+	const FItemStack& GetItemStack() const { return ItemStack; }
+	void SetItemStack(const FItemStack& NewItemStack);
+
+	virtual bool CanInteract_Implementation(APawn* InstigatorPawn) const override;
+	virtual void Interact_Implementation(APawn* InstigatorPawn) override;
 
 	
 protected:
@@ -41,6 +50,9 @@ protected:
 	
 	UPROPERTY(EditAnywhere,Replicated)
 	int32 ID;
+
+	UPROPERTY(ReplicatedUsing=OnRep_ItemStack, EditAnywhere, Category="Survival")
+	FItemStack ItemStack;
 	
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<UStaticMeshComponent> StaticMeshComponent;

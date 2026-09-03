@@ -6,6 +6,7 @@
 #include "GameplayTagAssetInterface.h"
 #include "GameFramework/Character.h"
 #include "LegoGame/Interface/SkinInterface.h"
+#include "LegoGame/Survival/Contracts/SurvivalInterfaces.h"
 #include "LgCharacterBase.generated.h"
 
 enum class ETeamType : uint8;
@@ -13,6 +14,8 @@ class ALgCharacterBase;
 class AWeaponBase;
 class USkinComponent;
 class UPackageComponent;
+class USurvivalVitalsComponent;
+class ASurvivalWorkbenchActor;
 class APlayerCharacter;
 class UBillboardComponent;
 
@@ -20,7 +23,9 @@ DECLARE_MULTICAST_DELEGATE_OneParam(NotifyDamage,ALgCharacterBase*)
 
 
 UCLASS()
-class LEGOGAME_API ALgCharacterBase : public ACharacter, public IGameplayTagAssetInterface,public ISkinInterface
+class LEGOGAME_API ALgCharacterBase : public ACharacter, public IGameplayTagAssetInterface,public ISkinInterface,
+	public ISurvivalInventoryInterface, public ISurvivalVitalsInterface, public ISurvivalWeaponStateInterface
+	, public ISurvivalCraftingInterface
 {
 	GENERATED_BODY()
 
@@ -58,12 +63,30 @@ public:
 	bool IsIronSight()const{return bIronSight;}
 	
 	TObjectPtr<UPackageComponent> GetPackageComponent()const {return PackageComponent;}
+	TObjectPtr<USurvivalVitalsComponent> GetSurvivalVitalsComponent() const { return SurvivalVitalsComponent; }
 	
 	TObjectPtr<USkinComponent> GetSkinComponent()const {return SkinComponent;}
 	
 	TObjectPtr<AWeaponBase> GetHoldWeapon()const;
 	
 	ETeamType GetTeamType() const;
+
+	virtual void GetInventoryItems_Implementation(TArray<FSurvivalItemView>& OutItems) const override;
+	virtual bool GetInventoryItem_Implementation(int32 SlotId, FSurvivalItemView& OutItem) const override;
+	virtual int32 GetItemQuantityByTag_Implementation(FGameplayTag ItemTag) const override;
+	virtual bool TryConsumeItemsByTag_Implementation(FGameplayTag ItemTag, int32 Quantity) override;
+	virtual bool TryAddItemStack_Implementation(const FItemStack& ItemStack) override;
+	virtual bool TryRemoveItemStack_Implementation(int32 SlotId, int32 Quantity, FItemStack& RemovedStack) override;
+	virtual void TransferAllItemsTo_Implementation(AActor* Destination) override;
+	virtual void RequestTransferItemStack_Implementation(int32 SlotId, int32 Quantity, AActor* Destination) override;
+	virtual void RequestDropItemStack_Implementation(int32 SlotId, int32 Quantity) override;
+	virtual void RequestConsumeItemStack_Implementation(int32 SlotId, int32 Quantity) override;
+	virtual FSurvivalVitalsSnapshot GetSurvivalVitalsSnapshot_Implementation() const override;
+	virtual FSurvivalWeaponAmmoSnapshot GetSurvivalWeaponAmmoSnapshot_Implementation() const override;
+	virtual void GetAvailableRecipes_Implementation(TArray<FSurvivalRecipeDefinition>& OutRecipes) const override;
+	virtual void RequestCraftRecipe_Implementation(FName RecipeId, int32 CraftCount) override;
+
+	void SetActiveSurvivalWorkbench(ASurvivalWorkbenchActor* Workbench);
 	
 	void StartSprint();
 	void StopSprint();
@@ -79,6 +102,7 @@ public:
 protected:
 	
 	virtual float TakeDamage(float DamageAmount, struct FDamageEvent const& DamageEvent, class AController* EventInstigator, AActor* DamageCauser) override;
+	float GetSurvivalDamageScale(AController* EventInstigator, AActor* DamageCauser) const;
 	
 	virtual void OnConstruction(const FTransform& Transform) override;
 	
@@ -96,6 +120,9 @@ protected:
 
 	UFUNCTION(Server, Reliable, WithValidation)
 	void Server_SetIronSight(bool bNewIronSight);
+
+	UFUNCTION(Server, Reliable)
+	void Server_RequestCraftRecipe(FName RecipeId, int32 CraftCount);
 	
 protected:
 	UPROPERTY(Replicated)
@@ -111,6 +138,12 @@ protected:
 	
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<USkinComponent> SkinComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Survival")
+	TObjectPtr<USurvivalVitalsComponent> SurvivalVitalsComponent;
+
+	UPROPERTY(Replicated)
+	TObjectPtr<ASurvivalWorkbenchActor> ActiveSurvivalWorkbench;
 	
 	UPROPERTY(EditAnywhere)
 	ETeamType TeamType;

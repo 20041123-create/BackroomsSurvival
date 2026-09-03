@@ -4,11 +4,15 @@
 #include "LgCharacterBase.h"
 
 #include "Components/BillboardComponent.h"
+#include "GameFramework/GameStateBase.h"
 #include "LegoGame/LegoGame.h"
 #include "LegoGame/Components/LgCharacterMovementComponent.h"
 #include "LegoGame/Components/PackageComponent.h"
 #include "LegoGame/Components/SkinComponent.h"
 #include "LegoGame/GamePlay/MainGame/LgPlayerState.h"
+#include "LegoGame/Survival/Contracts/SurvivalInterfaces.h"
+#include "LegoGame/Survival/SurvivalWorkbenchActor.h"
+#include "LegoGame/Survival/SurvivalVitalsComponent.h"
 #include "LegoGame/Weapon/WeaponBase.h"
 #include "Net/UnrealNetwork.h"
 
@@ -23,6 +27,7 @@ ALgCharacterBase::ALgCharacterBase(const FObjectInitializer& ObjectInitializer)
 	PackageComponent = CreateDefaultSubobject<UPackageComponent>(TEXT("PackageComponent"));//功能组件没有坐标关系，不需要setupattachment
 	
 	SkinComponent = CreateDefaultSubobject<USkinComponent>(TEXT("SkinComponent"));
+	SurvivalVitalsComponent = CreateDefaultSubobject<USurvivalVitalsComponent>(TEXT("SurvivalVitalsComponent"));
 	
 	//关闭角色跟随控制器旋转
 	bUseControllerRotationYaw = false;
@@ -56,6 +61,7 @@ void ALgCharacterBase::GetLifetimeReplicatedProps(TArray<class FLifetimeProperty
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(ALgCharacterBase, bSprinting);
 	DOREPLIFETIME(ALgCharacterBase, bIronSight);
+	DOREPLIFETIME_CONDITION(ALgCharacterBase, ActiveSurvivalWorkbench, COND_OwnerOnly);
 	
 	
 }
@@ -100,19 +106,26 @@ void ALgCharacterBase::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 float ALgCharacterBase::TakeDamage(float DamageAmount, struct FDamageEvent const& DamageEvent,
 	class AController* EventInstigator, AActor* DamageCauser)
 {
-	if (!HasAuthority() || !EventInstigator || !EventInstigator->GetPawn())
+	if (!HasAuthority() || DamageAmount <= 0.0f)
 	{
 		return 0.0f;
 	}
+
+	const float EffectiveDamage = DamageAmount * GetSurvivalDamageScale(EventInstigator, DamageCauser);
 	
-	UE_LOG(LogTemp, Warning, TEXT("我是%s,我被%s攻击了"),*GetName(),*EventInstigator->GetPawn()->GetName());
+	UE_LOG(LogTemp, Verbose, TEXT("Survival damage: Victim=%s Attacker=%s Raw=%.2f Effective=%.2f"),
+		*GetName(), *GetNameSafe(EventInstigator ? EventInstigator->GetPawn() : DamageCauser),
+		DamageAmount, EffectiveDamage);
 	
 	if (OnReceiveDamage.IsBound())
 	{
 		OnReceiveDamage.Broadcast(Cast<ALgCharacterBase>(EventInstigator->GetPawn()));
 	}
 	
-	return Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
+	Super::TakeDamage(EffectiveDamage, DamageEvent, EventInstigator, DamageCauser);
+	return SurvivalVitalsComponent
+		? SurvivalVitalsComponent->ApplyDamage(EffectiveDamage, EventInstigator, DamageCauser)
+		: EffectiveDamage;
 	
 }
 
@@ -175,6 +188,172 @@ ETeamType ALgCharacterBase::GetTeamType() const
 		return Ps->GetTeamType();
 	}
 	return TeamType;
+}
+
+void ALgCharacterBase::GetInventoryItems_Implementation(TArray<FSurvivalItemView>& OutItems) const
+{
+	if (PackageComponent)
+	{
+		PackageComponent->GetSurvivalInventoryItems(OutItems);
+	}
+	else
+	{
+		OutItems.Reset();
+	}
+}
+
+bool ALgCharacterBase::GetInventoryItem_Implementation(int32 SlotId, FSurvivalItemView& OutItem) const
+{
+	return PackageComponent && PackageComponent->GetSurvivalInventoryItem(SlotId, OutItem);
+}
+
+int32 ALgCharacterBase::GetItemQuantityByTag_Implementation(FGameplayTag ItemTag) const
+{
+	return PackageComponent ? PackageComponent->GetItemQuantityByTag(ItemTag) : 0;
+}
+
+bool ALgCharacterBase::TryConsumeItemsByTag_Implementation(FGameplayTag ItemTag, int32 Quantity)
+{
+	return PackageComponent && PackageComponent->TryConsumeItemsByTag(ItemTag, Quantity);
+}
+
+bool ALgCharacterBase::TryAddItemStack_Implementation(const FItemStack& ItemStack)
+{
+	return PackageComponent && PackageComponent->TryAddItemStack(ItemStack);
+}
+
+bool ALgCharacterBase::TryRemoveItemStack_Implementation(int32 SlotId, int32 Quantity, FItemStack& RemovedStack)
+{
+	return PackageComponent && PackageComponent->TryRemoveItemStack(SlotId, Quantity, RemovedStack);
+}
+
+void ALgCharacterBase::TransferAllItemsTo_Implementation(AActor* Destination)
+{
+	if (PackageComponent)
+	{
+		PackageComponent->TransferAllSurvivalItemsTo(Destination);
+	}
+}
+
+void ALgCharacterBase::RequestTransferItemStack_Implementation(int32 SlotId, int32 Quantity, AActor* Destination)
+{
+	if (PackageComponent)
+	{
+		PackageComponent->RequestTransferItemStack(SlotId, Quantity, Destination);
+	}
+}
+
+void ALgCharacterBase::RequestDropItemStack_Implementation(int32 SlotId, int32 Quantity)
+{
+	if (PackageComponent)
+	{
+		PackageComponent->RequestDropItemStack(SlotId, Quantity);
+	}
+}
+
+void ALgCharacterBase::RequestConsumeItemStack_Implementation(int32 SlotId, int32 Quantity)
+{
+	if (PackageComponent)
+	{
+		PackageComponent->RequestConsumeItemStack(SlotId, Quantity);
+	}
+}
+
+FSurvivalVitalsSnapshot ALgCharacterBase::GetSurvivalVitalsSnapshot_Implementation() const
+{
+	return SurvivalVitalsComponent ? SurvivalVitalsComponent->GetSnapshot() : FSurvivalVitalsSnapshot();
+}
+
+FSurvivalWeaponAmmoSnapshot ALgCharacterBase::GetSurvivalWeaponAmmoSnapshot_Implementation() const
+{
+	FSurvivalWeaponAmmoSnapshot Snapshot;
+	const AWeaponBase* EquippedWeapon = GetHoldWeapon();
+	if (!EquippedWeapon)
+	{
+		return Snapshot;
+	}
+
+	Snapshot.bHasEquippedWeapon = true;
+	Snapshot.LoadedAmmo = FMath::Max(0, EquippedWeapon->GetCurrentClipVolume());
+	Snapshot.ClipCapacity = FMath::Max(0, EquippedWeapon->GetMaxClipVolume());
+	const int32 AmmoItemId = EquippedWeapon->GetAmmoItemId();
+	Snapshot.ReserveAmmo = PackageComponent && AmmoItemId != INDEX_NONE
+		? FMath::Max(0, PackageComponent->GetItemQuantityById(AmmoItemId))
+		: 0;
+	return Snapshot;
+}
+
+void ALgCharacterBase::GetAvailableRecipes_Implementation(TArray<FSurvivalRecipeDefinition>& OutRecipes) const
+{
+	if (ActiveSurvivalWorkbench)
+	{
+		ActiveSurvivalWorkbench->GetAvailableRecipes(OutRecipes);
+	}
+	else
+	{
+		OutRecipes.Reset();
+	}
+}
+
+void ALgCharacterBase::RequestCraftRecipe_Implementation(FName RecipeId, int32 CraftCount)
+{
+	if (HasAuthority())
+	{
+		if (ActiveSurvivalWorkbench)
+		{
+			ActiveSurvivalWorkbench->TryCraft(this, RecipeId, CraftCount);
+		}
+	}
+	else
+	{
+		Server_RequestCraftRecipe(RecipeId, CraftCount);
+	}
+}
+
+void ALgCharacterBase::SetActiveSurvivalWorkbench(ASurvivalWorkbenchActor* Workbench)
+{
+	if (HasAuthority())
+	{
+		ActiveSurvivalWorkbench = Workbench;
+		ForceNetUpdate();
+	}
+}
+
+float ALgCharacterBase::GetSurvivalDamageScale(AController* EventInstigator, AActor* DamageCauser) const
+{
+	const ALgCharacterBase* Attacker = EventInstigator ? Cast<ALgCharacterBase>(EventInstigator->GetPawn()) : nullptr;
+	if (!Attacker && DamageCauser)
+	{
+		Attacker = Cast<ALgCharacterBase>(DamageCauser->GetOwner());
+	}
+
+	if (!Attacker || Attacker == this)
+	{
+		return 1.0f;
+	}
+
+	const ETeamType AttackerTeam = Attacker->GetTeamType();
+	const ETeamType VictimTeam = GetTeamType();
+	if (AttackerTeam == ETeamType::ETT_None || VictimTeam == ETeamType::ETT_None || AttackerTeam != VictimTeam)
+	{
+		return 1.0f;
+	}
+
+	float FriendlyFireScale = 0.25f;
+	if (const UWorld* World = GetWorld())
+	{
+		if (AGameStateBase* GameState = World->GetGameState())
+		{
+			if (GameState->GetClass()->ImplementsInterface(USurvivalMatchStateInterface::StaticClass()))
+			{
+				if (const USurvivalModeConfig* Config = ISurvivalMatchStateInterface::Execute_GetSurvivalConfig(GameState))
+				{
+					FriendlyFireScale = Config->FriendlyFireDamageScale;
+				}
+			}
+		}
+	}
+	return FMath::Clamp(FriendlyFireScale, 0.0f, 1.0f);
 }
 
 void ALgCharacterBase::StartFire()
@@ -298,6 +477,11 @@ void ALgCharacterBase::Server_SetIronSight_Implementation(bool bNewIronSight)
 bool ALgCharacterBase::Server_SetIronSight_Validate(bool bNewIronSight)
 {
 	return true;
+}
+
+void ALgCharacterBase::Server_RequestCraftRecipe_Implementation(FName RecipeId, int32 CraftCount)
+{
+	RequestCraftRecipe_Implementation(RecipeId, CraftCount);
 }
 
 void ALgCharacterBase::UpdateJobMesh()

@@ -8,6 +8,12 @@
 #include "LegoGame/LegoGame.h"
 #include "LegoGame/GamePlay/LgGameInstance.h"
 
+namespace
+{
+	constexpr TCHAR LegacyTestMapPath[] = TEXT("/Game/LegoGame/Maps/TestMap");
+	constexpr TCHAR SurvivalMapPath[] = TEXT("/Game/LegoGame/Survival/Maps/L_SurvivalWorld");
+}
+
 AHallGameMode::AHallGameMode()
 {
 	HUDClass = AHallHUD::StaticClass();
@@ -70,9 +76,11 @@ void AHallGameMode::StartLgGame()
 
 	if (ULgGameInstance* GameInstance = Cast<ULgGameInstance>(GetGameInstance()))
 	{
-		const FString MapPath = GameInstance->GetMapName().IsEmpty()
-			? TEXT("/Game/LegoGame/Maps/TestMap")
-			: GameInstance->GetMapName();
+		FString MapPath = GameInstance->GetMapName();
+		if (MapPath.IsEmpty() || MapPath == LegacyTestMapPath)
+		{
+			MapPath = SurvivalMapPath;
+		}
 		GetWorld()->ServerTravel(MapPath);
 	}
 }

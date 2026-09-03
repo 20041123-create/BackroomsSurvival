@@ -45,6 +45,8 @@ protected:
 	
 	void OnEquipWeapon(int32 ID);
 	void OnUnEquipWeapon(int32 ID);
+	void OnSurvivalInventoryChanged(const TArray<FItemStack>& Items);
+	void OnSurvivalInventorySelectionChanged(int32 SelectedSlotId);
 	
 	UPROPERTY(meta=(BindWidget))
 	TObjectPtr<UScrollBox> NearBox;

@@ -1,0 +1,2 @@
+#include "RandomRoomGenerationRuntime.h"
+IMPLEMENT_MODULE(FRandomRoomGenerationRuntimeModule, RandomRoomGenerationRuntime)

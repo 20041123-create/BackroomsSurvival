@@ -8,6 +8,7 @@
 #include "LegoGame/LegoGame.h"
 #include "LegoGame/Character/LgCharacterBase.h"
 #include "LegoGame/Components/PackageComponent.h"
+#include "LegoGame/Subsystem/PropsSubsystem.h"
 #include "Net/UnrealNetwork.h"
 #include "Sound/SoundCue.h"
 #include "TimerManager.h"
@@ -180,7 +181,7 @@ void AWeaponBase::SpawnDamage(const FVector& ViewOrigin, const FVector& ViewDire
 		if (AActor* HitActor = WeaponHit.GetActor())
 		{
 			FPointDamageEvent DamageEvent;
-			HitActor->TakeDamage(1.0f, DamageEvent, MyMaster->GetController(), this);
+			HitActor->TakeDamage(DamagePerShot, DamageEvent, MyMaster->GetController(), this);
 		}
 	}
 }
@@ -346,6 +347,24 @@ void AWeaponBase::StartReloadOnServer()
 		return;
 	}
 
+	PendingReloadAmount = MaxClipVolume - CurrClipVolume;
+	const int32 AmmoItemId = GetAmmoItemId();
+	if (AmmoItemId != INDEX_NONE)
+	{
+		UPackageComponent* Package = MyMaster->GetPackageComponent();
+		if (!Package)
+		{
+			return;
+		}
+
+		PendingReloadAmount = FMath::Min(PendingReloadAmount, Package->GetItemQuantityById(AmmoItemId));
+		if (PendingReloadAmount <= 0 || !Package->ConsumeItemById(AmmoItemId, PendingReloadAmount))
+		{
+			PendingReloadAmount = 0;
+			return;
+		}
+	}
+
 	StopFire();
 	CurrentState = EWeaponState::EWS_Reloading;
 	Multicast_PlayReloadMontage();
@@ -366,7 +385,8 @@ void AWeaponBase::MakeFullClip()
 	}
 
 	GetWorldTimerManager().ClearTimer(ReloadTimerHandle);
-	CurrClipVolume = MaxClipVolume;
+	CurrClipVolume = FMath::Clamp(CurrClipVolume + PendingReloadAmount, 0, MaxClipVolume);
+	PendingReloadAmount = 0;
 	CurrentState = EWeaponState::EWS_Normal;
 
 	if (OnWeaponClipChanged.IsBound())
@@ -374,6 +394,39 @@ void AWeaponBase::MakeFullClip()
 		OnWeaponClipChanged.Broadcast(CurrClipVolume, MaxClipVolume);
 	}
 	ForceNetUpdate();
+}
+
+int32 AWeaponBase::GetAmmoItemId() const
+{
+	const UWorld* World = GetWorld();
+	UPropsSubsystem* Props = World ? World->GetGameInstance()->GetSubsystem<UPropsSubsystem>() : nullptr;
+	return Props ? Props->GetAmmoItemIdForWeapon(ID) : INDEX_NONE;
+}
+
+int32 AWeaponBase::ExtractLoadedAmmo()
+{
+	if (!HasAuthority() || GetAmmoItemId() == INDEX_NONE)
+	{
+		return 0;
+	}
+
+	const int32 ExtractedAmmo = CurrClipVolume;
+	CurrClipVolume = 0;
+	PendingReloadAmount = 0;
+	CurrentState = EWeaponState::EWS_Normal;
+	ForceNetUpdate();
+	return ExtractedAmmo;
+}
+
+void AWeaponBase::PrepareForSurvivalInventory()
+{
+	if (HasAuthority() && GetAmmoItemId() != INDEX_NONE)
+	{
+		CurrClipVolume = 0;
+		PendingReloadAmount = 0;
+		CurrentState = EWeaponState::EWS_Normal;
+		ForceNetUpdate();
+	}
 }
 
 void AWeaponBase::OnRep_CurrentClipVolume()

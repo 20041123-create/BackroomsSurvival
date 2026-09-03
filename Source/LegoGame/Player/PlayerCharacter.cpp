@@ -19,6 +19,7 @@
 #include "LegoGame/SaveGame/CustomKeySaveGame.h"
 #include "LegoGame/Scene/SceneItemActor.h"
 #include "LegoGame/Settings/LgGameUserSettings.h"
+#include "LegoGame/Survival/Contracts/SurvivalInterfaces.h"
 
 #define INSERT_ACTION_KEY(KeyEventName) if (DT_KeyMapping->GetRowMap().Contains(KeyEventName))\
 		{\
@@ -112,6 +113,7 @@ void APlayerCharacter::SetUpPlayerInputMappingContext()
 		INSERT_ACTION_KEY("Package");
 		INSERT_ACTION_KEY("IronSight");
 		INSERT_ACTION_KEY("Reload");
+		INSERT_ACTION_KEY("Interact");
 		
 		
 		
@@ -240,6 +242,69 @@ void APlayerCharacter::TogglePackageUI()
 	}
 }
 
+void APlayerCharacter::InteractWithNearbySurvivalActor()
+{
+	if (!PackageComponent)
+	{
+		return;
+	}
+
+	constexpr float InteractionQueryDistance = 250.0f;
+	const float InteractionQueryDistanceSquared = FMath::Square(InteractionQueryDistance);
+	AActor* BestTarget = nullptr;
+	float BestDistanceSquared = TNumericLimits<float>::Max();
+	auto ConsiderCandidate = [this, &BestTarget, &BestDistanceSquared, InteractionQueryDistanceSquared](AActor* Candidate)
+	{
+		if (!Candidate || Candidate == this
+			|| !Candidate->GetClass()->ImplementsInterface(USurvivalInteractableInterface::StaticClass()))
+		{
+			return;
+		}
+
+		const float DistanceSquared = FVector::DistSquared(Candidate->GetActorLocation(), GetActorLocation());
+		if (DistanceSquared > InteractionQueryDistanceSquared)
+		{
+			return;
+		}
+
+		if (!BestTarget || DistanceSquared < BestDistanceSquared
+			|| (FMath::IsNearlyEqual(DistanceSquared, BestDistanceSquared)
+				&& Candidate->GetFName().LexicalLess(BestTarget->GetFName())))
+		{
+			BestTarget = Candidate;
+			BestDistanceSquared = DistanceSquared;
+		}
+	};
+
+	for (auto It = NearbySurvivalInteractables.CreateIterator(); It; ++It)
+	{
+		AActor* Candidate = It->Get();
+		if (!Candidate || !Candidate->GetClass()->ImplementsInterface(USurvivalInteractableInterface::StaticClass()))
+		{
+			It.RemoveCurrent();
+			continue;
+		}
+
+		ConsiderCandidate(Candidate);
+	}
+
+	// Replication timing and authored mesh collision can prevent an initial overlap event.
+	// A bounded interface query on key press keeps discovery reliable while RequestInteract
+	// remains the server-authoritative distance and CanInteract gate.
+	TArray<AActor*> InterfaceActors;
+	UGameplayStatics::GetAllActorsWithInterface(
+		this, USurvivalInteractableInterface::StaticClass(), InterfaceActors);
+	for (AActor* Candidate : InterfaceActors)
+	{
+		ConsiderCandidate(Candidate);
+	}
+
+	if (BestTarget)
+	{
+		PackageComponent->RequestInteract(BestTarget);
+	}
+}
+
 void APlayerCharacter::OnComponentBeginOverlapEvent(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
@@ -253,6 +318,10 @@ void APlayerCharacter::OnComponentBeginOverlapEvent(UPrimitiveComponent* Overlap
 		{
 			PackageComponent->AddNearSceneItem(SceneItemActor);
 		}
+	}
+	if (OtherActor && OtherActor->GetClass()->ImplementsInterface(USurvivalInteractableInterface::StaticClass()))
+	{
+		NearbySurvivalInteractables.Add(OtherActor);
 	}
 }
 
@@ -270,6 +339,7 @@ void APlayerCharacter::OnComponentEndOverlapEvent(UPrimitiveComponent* Overlappe
 			PackageComponent->RemoveNearSceneItem(SceneItemActor);
 		}
 	}
+	NearbySurvivalInteractables.Remove(OtherActor);
 }
 
 
@@ -325,6 +395,10 @@ void APlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 		if (UInputAction* InputAction = GetInputAction("Package"))//只用绑定一个
 		{
 			EnhancedInputComponent->BindAction(InputAction,ETriggerEvent::Started,this,&ThisClass::TogglePackageUI);
+		}
+		if (UInputAction* InputAction = GetInputAction("Interact"))
+		{
+			EnhancedInputComponent->BindAction(InputAction,ETriggerEvent::Started,this,&ThisClass::InteractWithNearbySurvivalActor);
 		}
 	}
 }

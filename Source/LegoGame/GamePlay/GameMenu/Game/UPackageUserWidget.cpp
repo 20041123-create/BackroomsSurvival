@@ -35,6 +35,8 @@ void UUPackageUserWidget::RemoveFromParent()
 			
 			Player->GetPackageComponent()->OnAddItemToPackage.RemoveAll(PackageListViewWidget);
 			Player->GetPackageComponent()->OnRemoveItemFromPackage.RemoveAll(PackageListViewWidget);
+			Player->GetPackageComponent()->OnSurvivalInventoryChanged.RemoveAll(this);
+			Player->GetPackageComponent()->OnSurvivalInventorySelectionChanged.RemoveAll(this);
 			
 			Player->GetPackageComponent()->OnPutOnSkin.RemoveAll(this);
 			Player->GetPackageComponent()->OnTakeOffSkin.RemoveAll(this);
@@ -84,13 +86,15 @@ void UUPackageUserWidget::NativeConstruct()
 		//Player->GetPackageComponent()->OnAddNearItemActor.RemoveAll(this);
 		Player->GetPackageComponent()->OnAddItemToPackage.AddUObject(PackageListViewWidget,&UPackageListViewWidget::OnAddItemActorToPackage);
 		Player->GetPackageComponent()->OnRemoveItemFromPackage.AddUObject(PackageListViewWidget,&UPackageListViewWidget::OnRemoveItemActorFromPackage);
+		Player->GetPackageComponent()->OnSurvivalInventoryChanged.AddUObject(this, &ThisClass::OnSurvivalInventoryChanged);
+		Player->GetPackageComponent()->OnSurvivalInventorySelectionChanged.AddUObject(this, &ThisClass::OnSurvivalInventorySelectionChanged);
 		
 		Player->GetPackageComponent()->OnPutOnSkin.AddUObject(this,&ThisClass::OnPutOnSkin);
 		Player->GetPackageComponent()->OnTakeOffSkin.AddUObject(this,&ThisClass::OnTakeOffSkin);
 		
 		Player->GetPackageComponent()->OnEquipWeapon.AddUObject(this,&ThisClass::OnEquipWeapon);
 		Player->GetPackageComponent()->OnUnEquipWeapon.AddUObject(this,&ThisClass::OnUnEquipWeapon);
-		PackageListViewWidget->RefreshItems(Player->GetPackageComponent()->GetPackageItems());
+		PackageListViewWidget->RefreshItems();
 		Player->GetPackageComponent()->BroadcastCurrentEquipmentState();
 		
 		//生成展示actor
@@ -206,6 +210,22 @@ void UUPackageUserWidget::OnUnEquipWeapon(int32 ID)
 {
 	WeaponFrame->InitPanel(-1);
 	
+}
+
+void UUPackageUserWidget::OnSurvivalInventoryChanged(const TArray<FItemStack>& Items)
+{
+	if (PackageListViewWidget)
+	{
+		PackageListViewWidget->RefreshItems();
+	}
+}
+
+void UUPackageUserWidget::OnSurvivalInventorySelectionChanged(int32 SelectedSlotId)
+{
+	if (PackageListViewWidget)
+	{
+		PackageListViewWidget->UpdateSurvivalSelectionHighlight(SelectedSlotId);
+	}
 }
 
 

@@ -7,6 +7,8 @@
 #include "PackageListViewWidget.generated.h"
 
 class UListView;
+class UPackageComponent;
+struct FPackageListViewWidgetTestAccess;
 /**
  * 
  */
@@ -18,13 +20,20 @@ class LEGOGAME_API UPackageListViewWidget : public UUserWidget
 public:
 	void OnAddItemActorToPackage(int32 Key,int32 ID);
 	void OnRemoveItemActorFromPackage(int32 Key,int32 ID);
-	void RefreshItems(const TMap<int32,int32>& Items);
+	void RefreshItems();
+	void UpdateSurvivalSelectionHighlight(int32 SelectedSlotId);
 	
 protected:
+	virtual void NativeConstruct() override;
+	virtual void NativeDestruct() override;
 	//响应拖拽抬起
 	virtual bool NativeOnDrop(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent, UDragDropOperation* InOperation) override;
+	void HandleItemDoubleClicked(UObject* ListItem);
+	bool RequestUseSurvivalConsumable(UObject* ListItem, UPackageComponent* Package);
 
 protected:
 	UPROPERTY(meta=(BindWidget))
 	TObjectPtr<UListView> MyListView;
+
+	friend struct FPackageListViewWidgetTestAccess;
 };

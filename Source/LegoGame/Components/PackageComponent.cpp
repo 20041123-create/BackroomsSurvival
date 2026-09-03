@@ -7,6 +7,8 @@
 #include "LegoGame/Character/LgCharacterBase.h"
 #include "LegoGame/Scene/SceneItemActor.h"
 #include "LegoGame/Subsystem/PropsSubsystem.h"
+#include "LegoGame/Survival/Contracts/SurvivalInterfaces.h"
+#include "LegoGame/Survival/SurvivalVitalsComponent.h"
 #include "LegoGame/Weapon/WeaponBase.h"
 #include "Net/UnrealNetwork.h"
 
@@ -43,6 +45,7 @@ void UPackageComponent::GetLifetimeReplicatedProps(TArray<class FLifetimePropert
 	DOREPLIFETIME(UPackageComponent, HoldWeapon);
 	DOREPLIFETIME_CONDITION(UPackageComponent, PackageSnapshot, COND_OwnerOnly);
 	DOREPLIFETIME(UPackageComponent, SkinSnapshot);
+	DOREPLIFETIME_CONDITION(UPackageComponent, SurvivalItemStacks, COND_OwnerOnly);
 }
 
 void UPackageComponent::RebuildPackageSnapshot()
@@ -145,6 +148,11 @@ void UPackageComponent::OnRep_SkinSnapshot()
 	}
 }
 
+void UPackageComponent::OnRep_SurvivalItemStacks()
+{
+	NotifySurvivalInventoryChanged();
+}
+
 
 void UPackageComponent::BroadcastCurrentEquipmentState()
 {
@@ -209,6 +217,27 @@ void UPackageComponent::PickItemFromNear(ASceneItemActor* SceneItemActorActor)
 		{
 			return;
 		}
+		const FItemStack& SceneStack = SceneItemActorActor->GetItemStack();
+		if (IsSurvivalResourceItem(SceneStack.ItemId))
+		{
+			if (TryAddItemStack(SceneStack))
+			{
+				SceneItemActorActor->Destroy();
+			}
+			return;
+		}
+
+		UPropsSubsystem* Props = GetWorld()->GetGameInstance()->GetSubsystem<UPropsSubsystem>();
+		if (Props && Props->IsSurvivalWeaponItem(SceneStack.ItemId))
+		{
+			if (Props->IsValidSurvivalWeaponDefinition(SceneStack.ItemId)
+				&& SceneStack.Quantity == 1 && TryAddLegacyPackageItem(SceneStack.ItemId))
+			{
+				SceneItemActorActor->Destroy();
+			}
+			return;
+		}
+
 		AddItemToPackage(SceneItemActorActor->GetID());
 		//道具拾取完毕，移除地面上的Actor
 		SceneItemActorActor->Destroy();
@@ -220,10 +249,21 @@ void UPackageComponent::PickItemFromNear(ASceneItemActor* SceneItemActorActor)
 void UPackageComponent::AddItemToPackage(int32 ID)
 {
 	//将Id记录到我们的Map容器中
+	TryAddLegacyPackageItem(ID);
+}
+
+bool UPackageComponent::TryAddLegacyPackageItem(int32 ID)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || ID < 0)
+	{
+		return false;
+	}
+
 	const int32 Key = AllowPackageKey();
 	PackageMap.Add(Key,ID);
 	RebuildPackageSnapshot();
 	Client_OnAddItemToPackage(Key,ID);
+	return true;
 }
 
 void UPackageComponent::Client_OnAddItemToPackage_Implementation(int32 Key, int32 ID)
@@ -298,12 +338,28 @@ void UPackageComponent::RemoveItemFromPackageToScene(int32 Key)
 		}
 		return;
 	}
+
+	FItemStack SurvivalStack;
+	if (GetSurvivalStackForPackageKey(Key, SurvivalStack))
+	{
+		RequestDropItemStack(SurvivalStack.SlotId, SurvivalStack.Quantity);
+		return;
+	}
 	
+	if (!PackageMap.Contains(Key) || IsSurvivalMirrorPackageKey(Key))
+	{
+		return;
+	}
+	if (!SpawnSceneItemActorFromPlayerNear(PackageMap[Key]))
+	{
+		return;
+	}
+
 	int32 ID = 0;
 	if (RemoveItemFromPackage(Key,ID))//成功表明删除完毕
 	{
 		//从地面附近放置道具
-		SpawnSceneItemActorFromPlayerNear(ID);
+		// The pickup was successfully spawned before removing its authoritative package entry.
 	}
 }
 
@@ -318,11 +374,11 @@ bool UPackageComponent::Server_RemoveItemFromPackageToScene_Validate(int32 Key)
 	return true;
 }
 
-void UPackageComponent::SpawnSceneItemActorFromPlayerNear(int32 ID)
+ASceneItemActor* UPackageComponent::SpawnSceneItemActorFromPlayerNear(int32 ID)
 {
 	if (!GetOwner() || !GetOwner()->HasAuthority() || ID < 0)
 	{
-		return;
+		return nullptr;
 	}
 	//从玩家附近生成一个道具
 	//让一个向量绕着另外一个向量旋转一个角度
@@ -356,6 +412,7 @@ void UPackageComponent::SpawnSceneItemActorFromPlayerNear(int32 ID)
 		//告知引擎，Actor需要添加到世界，已经完成了生成操作
 		SceneItemActor->FinishSpawning(Transform);//FinishSpawning此函数为了告知引擎可以添加Actor到世界中
 	}
+	return SceneItemActor;
 }
 
 bool UPackageComponent::PutOnSkin(int32 ID, ESkinType SkinType)
@@ -428,47 +485,65 @@ int32 UPackageComponent::TakeOffSkin(ESkinType SkinType)
 
 void UPackageComponent::EquipWeapon(int32 ID)
 {
+	TryEquipWeapon(ID);
+}
+
+bool UPackageComponent::TryEquipWeapon(int32 ID)
+{
 	if (!GetOwner() || !GetOwner()->HasAuthority())
 	{
-		return;
+		return false;
 	}
-	//装备武器
-	const FPropsBase* PropsBase = GetWorld()->GetGameInstance()->GetSubsystem<UPropsSubsystem>()->GetPropsById(ID);
-	if (!PropsBase || PropsBase->Type!=EPropsType::EPT_Weapon)
+
+	UPropsSubsystem* Props = GetWorld() ? GetWorld()->GetGameInstance()->GetSubsystem<UPropsSubsystem>() : nullptr;
+	if (!Props || !Props->IsValidSurvivalWeaponDefinition(ID))
 	{
-		return;
+		return false;
 	}
-	const FWeaponBaseHeader* WeaponBaseHeader = static_cast<const FWeaponBaseHeader*>(PropsBase);
-	//创建枪械对象
-	//检查手上是否有武器，如果有武器要先卸载武器
-	if (HoldWeapon)
-	{
-		AddItemToPackage(HoldWeapon->GetID());
-		HoldWeapon->Destroy();
-	}
-	//【关键修复1：防止0,0,0位置剔除，且第一时间赋予Owner】
+
+	const FWeaponBaseHeader* WeaponDefinition = static_cast<const FWeaponBaseHeader*>(Props->GetPropsById(ID));
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.Owner = GetOwner();
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-	// 在玩家当前位置生成，确保网络相关性立即生效
-	FTransform SpawnTransform = GetOwner()->GetActorTransform();
-	HoldWeapon = GetWorld()->SpawnActor<AWeaponBase>(WeaponBaseHeader->WeaponClass, SpawnTransform, SpawnParams);
-	//创建枪械实例
-	//HoldWeapon = GetWorld()->SpawnActor<AWeaponBase>(WeaponBaseHeader->WeaponClass);//创建了枪械的实例
-	HoldWeapon->SetID(ID);//一定要给ID，否则卸载武器无法添加到背包内
-	HoldWeapon->SetMaster(Cast<ALgCharacterBase>(GetOwner()));
-	//【关键修复2：服务器直接在本地广播，不要使用 Multi RPC】
-	if (OnEquipWeapon.IsBound())
+	AWeaponBase* NewWeapon = GetWorld()->SpawnActor<AWeaponBase>(WeaponDefinition->WeaponClass,
+		GetOwner()->GetActorTransform(), SpawnParams);
+	if (!NewWeapon)
 	{
-		//UE_LOG(LogTemp, Warning, TEXT("yesyesyes"));
-		OnEquipWeapon.Broadcast(ID);
+		return false;
 	}
+
+	if (HoldWeapon)
+	{
+		const int32 AmmoItemId = HoldWeapon->GetAmmoItemId();
+		const int32 LoadedAmmo = HoldWeapon->GetCurrentClipVolume();
+		if (AmmoItemId != INDEX_NONE && LoadedAmmo > 0)
+		{
+			FItemStack AmmoStack;
+			AmmoStack.ItemId = AmmoItemId;
+			AmmoStack.Quantity = LoadedAmmo;
+			if (!TryAddItemStack(AmmoStack))
+			{
+				NewWeapon->Destroy();
+				return false;
+			}
+			HoldWeapon->ExtractLoadedAmmo();
+		}
+
+		if (!TryAddLegacyPackageItem(HoldWeapon->GetID()))
+		{
+			NewWeapon->Destroy();
+			return false;
+		}
+		HoldWeapon->Destroy();
+	}
+
+	HoldWeapon = NewWeapon;
+	HoldWeapon->SetID(ID);
+	HoldWeapon->SetMaster(Cast<ALgCharacterBase>(GetOwner()));
+	HoldWeapon->PrepareForSurvivalInventory();
+	OnEquipWeapon.Broadcast(ID);
 	GetOwner()->ForceNetUpdate();
-	
-	//Multi_OnEquipWeapon(ID);
-	
-	//OnRep_HoldWeapon();
+	return true;
 }
 
 void UPackageComponent::OnRep_HoldWeapon()
@@ -551,6 +626,11 @@ bool UPackageComponent::Server_PutOnSkinFromNear_Validate(ASceneItemActor* Scene
 
 void UPackageComponent::PutOnSkinFromPackage(int32 Key, ESkinType SkinType)
 {
+	if (IsSurvivalMirrorPackageKey(Key))
+	{
+		return;
+	}
+
 	if (!GetOwner()->HasAuthority())
 	{
 		if (PackageMap.Contains(Key))
@@ -641,13 +721,16 @@ void UPackageComponent::EquipWeaponFromNear(ASceneItemActor* SceneItemActor)
 		return;
 	}
 	
-	if (IsValid(SceneItemActor) && SceneItemActor->GetID() >= WEAPON_INDEX
+	const UPropsSubsystem* Props = GetWorld() ? GetWorld()->GetGameInstance()->GetSubsystem<UPropsSubsystem>() : nullptr;
+	if (IsValid(SceneItemActor) && Props && Props->IsValidSurvivalWeaponDefinition(SceneItemActor->GetID())
 		&& FVector::DistSquared(SceneItemActor->GetActorLocation(), GetOwner()->GetActorLocation())
 			<= FMath::Square(250.0f))
 	{
 		//装备武器
-		EquipWeapon(SceneItemActor->GetID());
-		SceneItemActor->Destroy();
+		if (SceneItemActor->GetItemStack().Quantity == 1 && TryEquipWeapon(SceneItemActor->GetID()))
+		{
+			SceneItemActor->Destroy();
+		}
 	}
 	
 }
@@ -668,6 +751,10 @@ void UPackageComponent::EquipWeaponFromPackage(int32 Key)
 	if (!IsValid(this) || !IsValid(GetOwner()))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("EquipWeaponFromPackage failed: Component or Owner is invalid!"));
+		return;
+	}
+	if (IsSurvivalMirrorPackageKey(Key))
+	{
 		return;
 	}
 	
@@ -719,6 +806,15 @@ void UPackageComponent::UnEquipWeaponToScene()
 	
 	if (HoldWeapon)
 	{
+		const int32 AmmoItemId = HoldWeapon->GetAmmoItemId();
+		const int32 LoadedAmmo = HoldWeapon->ExtractLoadedAmmo();
+		if (AmmoItemId != INDEX_NONE && LoadedAmmo > 0)
+		{
+			FItemStack AmmoStack;
+			AmmoStack.ItemId = AmmoItemId;
+			AmmoStack.Quantity = LoadedAmmo;
+			SpawnSceneItemActorFromPlayerNear(AmmoStack);
+		}
 		SpawnSceneItemActorFromPlayerNear(HoldWeapon->GetID());
 		HoldWeapon->Destroy();
 		HoldWeapon = nullptr;
@@ -750,6 +846,19 @@ void UPackageComponent::UnEquipWeaponToPackage()
 	
 	if (HoldWeapon)
 	{
+		const int32 AmmoItemId = HoldWeapon->GetAmmoItemId();
+		const int32 LoadedAmmo = HoldWeapon->GetCurrentClipVolume();
+		if (AmmoItemId != INDEX_NONE && LoadedAmmo > 0)
+		{
+			FItemStack AmmoStack;
+			AmmoStack.ItemId = AmmoItemId;
+			AmmoStack.Quantity = LoadedAmmo;
+			if (!TryAddItemStack(AmmoStack))
+			{
+				return;
+			}
+			HoldWeapon->ExtractLoadedAmmo();
+		}
 		AddItemToPackage(HoldWeapon->GetID());
 		HoldWeapon->Destroy();
 		HoldWeapon = nullptr;
@@ -774,13 +883,771 @@ bool UPackageComponent::Server_UnEquipWeaponToPackage_Validate()
 
 void UPackageComponent::EquipWeaponFromPackage_Internal(int32 Key)
 {
-	if (PackageMap.Contains(Key) && PackageMap[Key] >= WEAPON_INDEX)
+	const int32* ItemId = PackageMap.Find(Key);
+	UPropsSubsystem* Props = GetWorld() ? GetWorld()->GetGameInstance()->GetSubsystem<UPropsSubsystem>() : nullptr;
+	if (!IsSurvivalMirrorPackageKey(Key) && ItemId && Props && Props->IsValidSurvivalWeaponDefinition(*ItemId)
+		&& TryEquipWeapon(*ItemId))
 	{
-		EquipWeapon(PackageMap[Key]);
 		int32 ID = 0;
 		RemoveItemFromPackage(Key, ID);
 	}
 	
+}
+
+int32 UPackageComponent::FindLowestAvailableSurvivalSlot(const TArray<FItemStack>& Items) const
+{
+	int32 SlotId = 0;
+	while (Items.ContainsByPredicate([SlotId](const FItemStack& Stack)
+	{
+		return Stack.SlotId == SlotId;
+	}))
+	{
+		++SlotId;
+	}
+	return SlotId;
+}
+
+bool UPackageComponent::IsSurvivalResourceItem(int32 ItemId) const
+{
+	const UWorld* World = GetWorld();
+	const UPropsSubsystem* Props = World ? World->GetGameInstance()->GetSubsystem<UPropsSubsystem>() : nullptr;
+	return Props && Props->IsStackableSurvivalResourceItem(ItemId);
+}
+
+bool UPackageComponent::IsSurvivalMirrorPackageKey(int32 PackageKey) const
+{
+	return PackageKey >= SurvivalMirrorPackageKeyBase;
+}
+
+int32 UPackageComponent::GetSurvivalMirrorPackageKey(int32 SlotId) const
+{
+	return SlotId >= 0 && SlotId <= MAX_int32 - SurvivalMirrorPackageKeyBase
+		? SurvivalMirrorPackageKeyBase + SlotId
+		: INDEX_NONE;
+}
+
+void UPackageComponent::SynchronizeSurvivalPackageMap()
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	for (auto It = PackageMap.CreateIterator(); It; ++It)
+	{
+		if (IsSurvivalMirrorPackageKey(It.Key()))
+		{
+			It.RemoveCurrent();
+		}
+	}
+
+	for (const FItemStack& Stack : SurvivalItemStacks)
+	{
+		const int32 PackageKey = GetSurvivalMirrorPackageKey(Stack.SlotId);
+		if (PackageKey != INDEX_NONE && Stack.IsValid() && IsSurvivalResourceItem(Stack.ItemId))
+		{
+			PackageMap.Add(PackageKey, Stack.ItemId);
+		}
+	}
+
+	RebuildPackageSnapshot();
+}
+
+void UPackageComponent::NotifySurvivalInventoryChanged()
+{
+	SurvivalItemStacks.Sort([](const FItemStack& Left, const FItemStack& Right)
+	{
+		return Left.SlotId < Right.SlotId;
+	});
+	if (GetOwner() && GetOwner()->HasAuthority())
+	{
+		SynchronizeSurvivalPackageMap();
+	}
+	SetSelectedSurvivalSlotId(SelectedSurvivalSlotId);
+	OnSurvivalInventoryChanged.Broadcast(SurvivalItemStacks);
+	if (GetOwner() && GetOwner()->HasAuthority())
+	{
+		GetOwner()->ForceNetUpdate();
+	}
+}
+
+void UPackageComponent::GetSurvivalInventoryItems(TArray<FSurvivalItemView>& OutItems) const
+{
+	OutItems.Reset();
+	const UWorld* World = GetWorld();
+	UPropsSubsystem* Props = World ? World->GetGameInstance()->GetSubsystem<UPropsSubsystem>() : nullptr;
+	if (!Props)
+	{
+		return;
+	}
+
+	for (const FItemStack& Stack : SurvivalItemStacks)
+	{
+		FSurvivalItemView View;
+		if (Props->GetSurvivalItemView(Stack.ItemId, View))
+		{
+			View.Stack = Stack;
+			OutItems.Add(MoveTemp(View));
+		}
+	}
+}
+
+bool UPackageComponent::GetSurvivalInventoryItem(int32 SlotId, FSurvivalItemView& OutItem) const
+{
+	const FItemStack* Stack = SurvivalItemStacks.FindByPredicate([SlotId](const FItemStack& Candidate)
+	{
+		return Candidate.SlotId == SlotId;
+	});
+	if (!Stack)
+	{
+		return false;
+	}
+
+	const UWorld* World = GetWorld();
+	UPropsSubsystem* Props = World ? World->GetGameInstance()->GetSubsystem<UPropsSubsystem>() : nullptr;
+	if (!Props || !Props->GetSurvivalItemView(Stack->ItemId, OutItem))
+	{
+		return false;
+	}
+
+	OutItem.Stack = *Stack;
+	return true;
+}
+
+int32 UPackageComponent::GetItemQuantityByTag(FGameplayTag ItemTag) const
+{
+	if (!ItemTag.IsValid())
+	{
+		return 0;
+	}
+
+	const UWorld* World = GetWorld();
+	const UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+	const UPropsSubsystem* Props = GameInstance ? GameInstance->GetSubsystem<UPropsSubsystem>() : nullptr;
+	if (!Props)
+	{
+		return 0;
+	}
+
+	int64 TotalQuantity = 0;
+	for (const FItemStack& Stack : SurvivalItemStacks)
+	{
+		if (!Stack.IsValid())
+		{
+			continue;
+		}
+
+		FSurvivalItemView ItemView;
+		if (Props->GetSurvivalItemView(Stack.ItemId, ItemView) && ItemView.ItemTags.HasTag(ItemTag))
+		{
+			TotalQuantity += Stack.Quantity;
+			if (TotalQuantity >= MAX_int32)
+			{
+				return MAX_int32;
+			}
+		}
+	}
+
+	return static_cast<int32>(TotalQuantity);
+}
+
+bool UPackageComponent::TryConsumeItemsByTag(FGameplayTag ItemTag, int32 Quantity)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || !ItemTag.IsValid() || Quantity <= 0)
+	{
+		return false;
+	}
+
+	UWorld* World = GetWorld();
+	UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+	UPropsSubsystem* Props = GameInstance ? GameInstance->GetSubsystem<UPropsSubsystem>() : nullptr;
+	if (!Props)
+	{
+		return false;
+	}
+
+	TArray<FItemStack> CandidateItems = SurvivalItemStacks;
+	TArray<int32> MatchingIndices;
+	int64 AvailableQuantity = 0;
+	for (int32 Index = 0; Index < CandidateItems.Num(); ++Index)
+	{
+		const FItemStack& Stack = CandidateItems[Index];
+		if (!Stack.IsValid())
+		{
+			continue;
+		}
+
+		FSurvivalItemView ItemView;
+		if (Props->GetSurvivalItemView(Stack.ItemId, ItemView) && ItemView.ItemTags.HasTag(ItemTag))
+		{
+			MatchingIndices.Add(Index);
+			AvailableQuantity += Stack.Quantity;
+		}
+	}
+
+	if (AvailableQuantity < Quantity)
+	{
+		return false;
+	}
+
+	MatchingIndices.Sort([&CandidateItems](int32 LeftIndex, int32 RightIndex)
+	{
+		const int32 LeftSlotId = CandidateItems[LeftIndex].SlotId;
+		const int32 RightSlotId = CandidateItems[RightIndex].SlotId;
+		return LeftSlotId == RightSlotId ? LeftIndex < RightIndex : LeftSlotId < RightSlotId;
+	});
+
+	int32 RemainingQuantity = Quantity;
+	for (const int32 Index : MatchingIndices)
+	{
+		if (RemainingQuantity <= 0)
+		{
+			break;
+		}
+
+		FItemStack& Stack = CandidateItems[Index];
+		const int32 QuantityToConsume = FMath::Min(Stack.Quantity, RemainingQuantity);
+		Stack.Quantity -= QuantityToConsume;
+		RemainingQuantity -= QuantityToConsume;
+	}
+
+	if (RemainingQuantity != 0)
+	{
+		return false;
+	}
+
+	CandidateItems.RemoveAll([](const FItemStack& Stack)
+	{
+		return Stack.Quantity <= 0;
+	});
+	SurvivalItemStacks = MoveTemp(CandidateItems);
+	NotifySurvivalInventoryChanged();
+	return true;
+}
+
+bool UPackageComponent::GetSurvivalStackForPackageKey(int32 PackageKey, FItemStack& OutStack) const
+{
+	OutStack = FItemStack();
+	if (!IsSurvivalMirrorPackageKey(PackageKey))
+	{
+		return false;
+	}
+
+	const int32 SlotId = PackageKey - SurvivalMirrorPackageKeyBase;
+	const FItemStack* Stack = SurvivalItemStacks.FindByPredicate([SlotId](const FItemStack& Candidate)
+	{
+		return Candidate.SlotId == SlotId;
+	});
+	if (!Stack || !Stack->IsValid() || !IsSurvivalResourceItem(Stack->ItemId))
+	{
+		return false;
+	}
+
+	OutStack = *Stack;
+	return true;
+}
+
+bool UPackageComponent::TryAddItemStack(const FItemStack& ItemStack)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || !ItemStack.IsValid() || !IsSurvivalResourceItem(ItemStack.ItemId))
+	{
+		return false;
+	}
+
+	UPropsSubsystem* Props = GetWorld()->GetGameInstance()->GetSubsystem<UPropsSubsystem>();
+	const int32 MaxStackSize = Props ? Props->GetMaxStackSize(ItemStack.ItemId) : 0;
+	if (MaxStackSize <= 0)
+	{
+		return false;
+	}
+
+	TArray<FItemStack> CandidateItems = SurvivalItemStacks;
+	int32 RemainingQuantity = ItemStack.Quantity;
+	for (FItemStack& ExistingStack : CandidateItems)
+	{
+		if (ExistingStack.ItemId != ItemStack.ItemId || ExistingStack.Quantity >= MaxStackSize)
+		{
+			continue;
+		}
+
+		const int32 AddedQuantity = FMath::Min(RemainingQuantity, MaxStackSize - ExistingStack.Quantity);
+		ExistingStack.Quantity += AddedQuantity;
+		RemainingQuantity -= AddedQuantity;
+		if (RemainingQuantity == 0)
+		{
+			break;
+		}
+	}
+
+	while (RemainingQuantity > 0)
+	{
+		if (CandidateItems.Num() >= SurvivalMaxSlots)
+		{
+			return false;
+		}
+
+		FItemStack& NewStack = CandidateItems.AddDefaulted_GetRef();
+		NewStack.SlotId = FindLowestAvailableSurvivalSlot(CandidateItems);
+		NewStack.ItemId = ItemStack.ItemId;
+		NewStack.Quantity = FMath::Min(RemainingQuantity, MaxStackSize);
+		RemainingQuantity -= NewStack.Quantity;
+	}
+
+	SurvivalItemStacks = MoveTemp(CandidateItems);
+	NotifySurvivalInventoryChanged();
+	return true;
+}
+
+bool UPackageComponent::TryRemoveItemStack(int32 SlotId, int32 Quantity, FItemStack& RemovedStack)
+{
+	RemovedStack = FItemStack();
+	if (!GetOwner() || !GetOwner()->HasAuthority() || Quantity <= 0)
+	{
+		return false;
+	}
+
+	const int32 StackIndex = SurvivalItemStacks.IndexOfByPredicate([SlotId](const FItemStack& Stack)
+	{
+		return Stack.SlotId == SlotId;
+	});
+	if (StackIndex == INDEX_NONE || SurvivalItemStacks[StackIndex].Quantity < Quantity)
+	{
+		return false;
+	}
+
+	FItemStack& SourceStack = SurvivalItemStacks[StackIndex];
+	RemovedStack.SlotId = SlotId;
+	RemovedStack.ItemId = SourceStack.ItemId;
+	RemovedStack.Quantity = Quantity;
+	SourceStack.Quantity -= Quantity;
+	if (SourceStack.Quantity == 0)
+	{
+		SurvivalItemStacks.RemoveAt(StackIndex);
+	}
+
+	NotifySurvivalInventoryChanged();
+	return true;
+}
+
+bool UPackageComponent::TryTransferItemStack(int32 SlotId, int32 Quantity, AActor* Destination)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || !Destination || Destination == GetOwner()
+		|| !Destination->GetClass()->ImplementsInterface(USurvivalInventoryInterface::StaticClass()))
+	{
+		return false;
+	}
+
+	FItemStack RemovedStack;
+	if (!TryRemoveItemStack(SlotId, Quantity, RemovedStack))
+	{
+		return false;
+	}
+
+	if (ISurvivalInventoryInterface::Execute_TryAddItemStack(Destination, RemovedStack))
+	{
+		return true;
+	}
+
+	TryAddItemStack(RemovedStack);
+	return false;
+}
+
+void UPackageComponent::TransferAllSurvivalItemsTo(AActor* Destination)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	const TArray<FItemStack> Snapshot = SurvivalItemStacks;
+	for (const FItemStack& Stack : Snapshot)
+	{
+		TryTransferItemStack(Stack.SlotId, Stack.Quantity, Destination);
+	}
+}
+
+void UPackageComponent::RequestTransferItemStack(int32 SlotId, int32 Quantity, AActor* Destination)
+{
+	if (GetOwner() && GetOwner()->HasAuthority())
+	{
+		TryTransferItemStack(SlotId, Quantity, Destination);
+	}
+	else
+	{
+		Server_RequestTransferItemStack(SlotId, Quantity, Destination);
+	}
+}
+
+void UPackageComponent::RequestDropItemStack(int32 SlotId, int32 Quantity)
+{
+	if (GetOwner() && GetOwner()->HasAuthority())
+	{
+		FItemStack RemovedStack;
+		if (TryRemoveItemStack(SlotId, Quantity, RemovedStack))
+		{
+			SpawnSceneItemActorFromPlayerNear(RemovedStack);
+		}
+	}
+	else
+	{
+		Server_RequestDropItemStack(SlotId, Quantity);
+	}
+}
+
+void UPackageComponent::RequestConsumeItemStack(int32 SlotId, int32 Quantity)
+{
+	if (!(GetOwner() && GetOwner()->HasAuthority()))
+	{
+		Server_RequestConsumeItemStack(SlotId, Quantity);
+		return;
+	}
+
+	FSurvivalItemView ItemView;
+	if (!GetSurvivalInventoryItem(SlotId, ItemView) || ItemView.Stack.Quantity < Quantity || Quantity <= 0)
+	{
+		return;
+	}
+
+	UPropsSubsystem* Props = GetWorld()->GetGameInstance()->GetSubsystem<UPropsSubsystem>();
+	float HealthDelta = 0.0f;
+	float HungerDelta = 0.0f;
+	float ThirstDelta = 0.0f;
+	if (!Props || !Props->GetConsumableEffects(ItemView.Stack.ItemId, HealthDelta, HungerDelta, ThirstDelta))
+	{
+		return;
+	}
+
+	if (ALgCharacterBase* Character = Cast<ALgCharacterBase>(GetOwner()))
+	{
+		if (USurvivalVitalsComponent* Vitals = Character->GetSurvivalVitalsComponent())
+		{
+			if (Vitals->ApplyConsumable(HealthDelta, HungerDelta, ThirstDelta, Quantity))
+			{
+				FItemStack RemovedStack;
+				TryRemoveItemStack(SlotId, Quantity, RemovedStack);
+			}
+		}
+	}
+}
+
+void UPackageComponent::SetSelectedSurvivalSlotId(int32 SlotId)
+{
+	const bool bIsValidSelection = SurvivalItemStacks.ContainsByPredicate([this, SlotId](const FItemStack& Stack)
+	{
+		return Stack.SlotId == SlotId && Stack.IsValid() && IsSurvivalResourceItem(Stack.ItemId);
+	});
+
+	const int32 NewSelectedSlotId = bIsValidSelection ? SlotId : INDEX_NONE;
+	if (SelectedSurvivalSlotId != NewSelectedSlotId)
+	{
+		SelectedSurvivalSlotId = NewSelectedSlotId;
+		OnSurvivalInventorySelectionChanged.Broadcast(SelectedSurvivalSlotId);
+	}
+}
+
+void UPackageComponent::RequestInteract(AActor* Target)
+{
+	if (!(GetOwner() && GetOwner()->HasAuthority()))
+	{
+		Server_RequestInteract(Target);
+		return;
+	}
+
+	if (!Target || !Target->GetClass()->ImplementsInterface(USurvivalInteractableInterface::StaticClass())
+		|| FVector::DistSquared(Target->GetActorLocation(), GetOwner()->GetActorLocation()) > FMath::Square(250.0f))
+	{
+		return;
+	}
+
+	APawn* InstigatorPawn = Cast<APawn>(GetOwner());
+	if (InstigatorPawn && ISurvivalInteractableInterface::Execute_CanInteract(Target, InstigatorPawn))
+	{
+		ISurvivalInteractableInterface::Execute_Interact(Target, InstigatorPawn);
+	}
+}
+
+bool UPackageComponent::ConsumeItemById(int32 ItemId, int32 Quantity)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || Quantity <= 0)
+	{
+		return false;
+	}
+
+	int32 RemainingQuantity = Quantity;
+	for (const FItemStack& Stack : SurvivalItemStacks)
+	{
+		if (Stack.ItemId == ItemId)
+		{
+			RemainingQuantity -= Stack.Quantity;
+		}
+	}
+	if (RemainingQuantity > 0)
+	{
+		return false;
+	}
+
+	RemainingQuantity = Quantity;
+	const TArray<FItemStack> Snapshot = SurvivalItemStacks;
+	for (const FItemStack& Stack : Snapshot)
+	{
+		if (Stack.ItemId != ItemId || RemainingQuantity <= 0)
+		{
+			continue;
+		}
+		FItemStack RemovedStack;
+		const int32 ToRemove = FMath::Min(Stack.Quantity, RemainingQuantity);
+		if (!TryRemoveItemStack(Stack.SlotId, ToRemove, RemovedStack))
+		{
+			return false;
+		}
+		RemainingQuantity -= ToRemove;
+	}
+	return RemainingQuantity == 0;
+}
+
+int32 UPackageComponent::GetItemQuantityById(int32 ItemId) const
+{
+	int32 TotalQuantity = 0;
+	for (const FItemStack& Stack : SurvivalItemStacks)
+	{
+		if (Stack.ItemId == ItemId)
+		{
+			TotalQuantity += Stack.Quantity;
+		}
+	}
+	return TotalQuantity;
+}
+
+bool UPackageComponent::TryCraftRecipe(const FSurvivalRecipeDefinition& Recipe, int32 CraftCount)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || Recipe.RecipeId.IsNone() || CraftCount <= 0
+		|| Recipe.Ingredients.IsEmpty() || Recipe.Results.IsEmpty())
+	{
+		return false;
+	}
+
+	UPropsSubsystem* Props = GetWorld()->GetGameInstance()->GetSubsystem<UPropsSubsystem>();
+	if (!Props)
+	{
+		return false;
+	}
+
+	TArray<FItemStack> CandidateItems = SurvivalItemStacks;
+	TMap<int32, int32> CandidatePackageItems = PackageMap;
+	for (const FItemStack& Ingredient : Recipe.Ingredients)
+	{
+		if (!Ingredient.IsValid() || !IsSurvivalResourceItem(Ingredient.ItemId)
+			|| Ingredient.Quantity > MAX_int32 / CraftCount)
+		{
+			return false;
+		}
+
+		int32 RemainingQuantity = Ingredient.Quantity * CraftCount;
+		for (int32 Index = CandidateItems.Num() - 1; Index >= 0 && RemainingQuantity > 0; --Index)
+		{
+			FItemStack& Stack = CandidateItems[Index];
+			if (Stack.ItemId != Ingredient.ItemId)
+			{
+				continue;
+			}
+
+			const int32 ConsumedQuantity = FMath::Min(Stack.Quantity, RemainingQuantity);
+			Stack.Quantity -= ConsumedQuantity;
+			RemainingQuantity -= ConsumedQuantity;
+			if (Stack.Quantity == 0)
+			{
+				CandidateItems.RemoveAt(Index);
+			}
+		}
+
+		if (RemainingQuantity > 0)
+		{
+			return false;
+		}
+	}
+
+	auto FindLowestCandidatePackageKey = [](const TMap<int32, int32>& Items)
+	{
+		int32 Key = 0;
+		while (Items.Contains(Key))
+		{
+			++Key;
+		}
+		return Key;
+	};
+
+	for (const FItemStack& Result : Recipe.Results)
+	{
+		if (!Result.IsValid() || Result.Quantity > MAX_int32 / CraftCount)
+		{
+			return false;
+		}
+
+		const int32 ResultQuantity = Result.Quantity * CraftCount;
+		if (IsSurvivalResourceItem(Result.ItemId))
+		{
+			const int32 MaxStackSize = Props->GetMaxStackSize(Result.ItemId);
+			if (MaxStackSize <= 0)
+			{
+				return false;
+			}
+
+			int32 RemainingQuantity = ResultQuantity;
+			for (FItemStack& ExistingStack : CandidateItems)
+			{
+				if (ExistingStack.ItemId != Result.ItemId || ExistingStack.Quantity >= MaxStackSize)
+				{
+					continue;
+				}
+
+				const int32 AddedQuantity = FMath::Min(RemainingQuantity, MaxStackSize - ExistingStack.Quantity);
+				ExistingStack.Quantity += AddedQuantity;
+				RemainingQuantity -= AddedQuantity;
+				if (RemainingQuantity == 0)
+				{
+					break;
+				}
+			}
+
+			while (RemainingQuantity > 0)
+			{
+				if (CandidateItems.Num() >= SurvivalMaxSlots)
+				{
+					return false;
+				}
+
+				FItemStack NewStack;
+				NewStack.SlotId = FindLowestAvailableSurvivalSlot(CandidateItems);
+				NewStack.ItemId = Result.ItemId;
+				NewStack.Quantity = FMath::Min(RemainingQuantity, MaxStackSize);
+				CandidateItems.Add(NewStack);
+				RemainingQuantity -= NewStack.Quantity;
+			}
+			continue;
+		}
+
+		if (!Props->IsValidSurvivalWeaponDefinition(Result.ItemId))
+		{
+			return false;
+		}
+
+		for (int32 WeaponIndex = 0; WeaponIndex < ResultQuantity; ++WeaponIndex)
+		{
+			CandidatePackageItems.Add(FindLowestCandidatePackageKey(CandidatePackageItems), Result.ItemId);
+		}
+	}
+
+	SurvivalItemStacks = MoveTemp(CandidateItems);
+	PackageMap = MoveTemp(CandidatePackageItems);
+	NotifySurvivalInventoryChanged();
+	return true;
+}
+
+void UPackageComponent::DropAllSurvivalItems()
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	for (const FItemStack& Stack : SurvivalItemStacks)
+	{
+		SpawnSceneItemActorFromPlayerNear(Stack);
+	}
+	SurvivalItemStacks.Reset();
+	NotifySurvivalInventoryChanged();
+
+	for (const TPair<int32, int32>& Item : PackageMap)
+	{
+		if (IsSurvivalMirrorPackageKey(Item.Key))
+		{
+			continue;
+		}
+
+		FItemStack Stack;
+		Stack.ItemId = Item.Value;
+		Stack.Quantity = 1;
+		SpawnSceneItemActorFromPlayerNear(Stack);
+	}
+	PackageMap.Reset();
+	RebuildPackageSnapshot();
+
+	for (const TPair<ESkinType, int32>& Skin : SkinMap)
+	{
+		FItemStack Stack;
+		Stack.ItemId = Skin.Value;
+		Stack.Quantity = 1;
+		SpawnSceneItemActorFromPlayerNear(Stack);
+	}
+	SkinMap.Reset();
+	RebuildSkinSnapshot();
+
+	if (HoldWeapon)
+	{
+		const int32 AmmoItemId = HoldWeapon->GetAmmoItemId();
+		const int32 LoadedAmmo = HoldWeapon->ExtractLoadedAmmo();
+		if (AmmoItemId != INDEX_NONE && LoadedAmmo > 0)
+		{
+			FItemStack AmmoStack;
+			AmmoStack.ItemId = AmmoItemId;
+			AmmoStack.Quantity = LoadedAmmo;
+			SpawnSceneItemActorFromPlayerNear(AmmoStack);
+		}
+
+		FItemStack Stack;
+		Stack.ItemId = HoldWeapon->GetID();
+		Stack.Quantity = 1;
+		SpawnSceneItemActorFromPlayerNear(Stack);
+		HoldWeapon->Destroy();
+		HoldWeapon = nullptr;
+		GetOwner()->ForceNetUpdate();
+	}
+}
+
+ASceneItemActor* UPackageComponent::SpawnSceneItemActorFromPlayerNear(const FItemStack& ItemStack)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || !ItemStack.IsValid())
+	{
+		return nullptr;
+	}
+
+	FVector NewDirection = GetOwner()->GetActorForwardVector().RotateAngleAxis(FMath::FRandRange(-90.f, 90.f), FVector::UpVector);
+	FVector Location = GetOwner()->GetActorLocation() + NewDirection * FMath::FRandRange(100.f, 150.f);
+	FHitResult Hit;
+	if (GetWorld()->LineTraceSingleByChannel(Hit, Location, Location + FVector::DownVector * 500.0f, ECC_Visibility))
+	{
+		Location = Hit.Location;
+	}
+
+	FTransform Transform;
+	Transform.SetLocation(Location);
+	ASceneItemActor* SceneItemActor = GetWorld()->SpawnActorDeferred<ASceneItemActor>(ASceneItemActor::StaticClass(), Transform);
+	if (SceneItemActor)
+	{
+		SceneItemActor->SetItemStack(ItemStack);
+		SceneItemActor->FinishSpawning(Transform);
+	}
+	return SceneItemActor;
+}
+
+void UPackageComponent::Server_RequestTransferItemStack_Implementation(int32 SlotId, int32 Quantity, AActor* Destination)
+{
+	TryTransferItemStack(SlotId, Quantity, Destination);
+}
+
+void UPackageComponent::Server_RequestDropItemStack_Implementation(int32 SlotId, int32 Quantity)
+{
+	RequestDropItemStack(SlotId, Quantity);
+}
+
+void UPackageComponent::Server_RequestConsumeItemStack_Implementation(int32 SlotId, int32 Quantity)
+{
+	RequestConsumeItemStack(SlotId, Quantity);
+}
+
+void UPackageComponent::Server_RequestInteract_Implementation(AActor* Target)
+{
+	RequestInteract(Target);
 }
 
 
